@@ -31,10 +31,6 @@ class AnswerResult:
     trace_id: str = ""
     latency_ms: int = 0
     stages: dict = field(default_factory=dict)
-    used_web: bool = False
-    used_tools: bool = False
-    tool_steps: list[dict] = field(default_factory=list)
-    clarify: bool = False  # 是否反问用户（澄清/确认）
 
 
 class QAEngine:

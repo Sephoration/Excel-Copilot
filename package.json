@@ -1,0 +1,9 @@
+{
+  "name": "excel-co-pilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Excel Co-Pilot：本地优先的 AI 数据工作台（Gradio 界面，经 npm run dev 转发 host/port 启动）",
+  "scripts": {
+    "dev": ".venv\\Scripts\\python.exe -m excel_co_pilot.main"
+  }
+}

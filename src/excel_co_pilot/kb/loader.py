@@ -249,6 +249,28 @@ def load_xlsx(path: Path, cfg) -> list[ContentBlock]:
     return blocks
 
 
+def load_csv(path: Path, cfg) -> list[ContentBlock]:
+    """CSV → 表格文本块（每 60 行一块，每块带表头，便于检索后理解列含义）。"""
+    import pandas as pd
+
+    from ..core.data_loader import _detect_encoding
+
+    df = pd.read_csv(path, encoding=_detect_encoding(path))
+    header = " | ".join(str(c) for c in df.columns)
+    blocks: list[ContentBlock] = []
+    rows: list[str] = []
+    for _, row in df.iterrows():
+        rows.append(" | ".join("" if pd.isna(v) else str(v) for v in row))
+        if len(rows) >= 60:
+            blocks.append(
+                ContentBlock(text=f"{header}\n" + "\n".join(rows), kind="table")
+            )
+            rows = []
+    if rows:
+        blocks.append(ContentBlock(text=f"{header}\n" + "\n".join(rows), kind="table"))
+    return blocks
+
+
 # ---------------- 注册表 ----------------
 
 
@@ -264,6 +286,7 @@ LOADERS: dict[str, object] = {
     ".docx": load_docx,
     ".pptx": load_pptx,
     ".xlsx": load_xlsx,
+    ".csv": load_csv,
 }
 
 

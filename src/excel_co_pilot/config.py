@@ -26,12 +26,12 @@ class Settings(BaseSettings):
     llm_timeout: float = 60.0
 
     max_file_size_mb: int = 200
-    executor_timeout: float = 5.0
-    max_reflect_retries: int = 3
 
     storage_dir: Path = PROJECT_ROOT / "storage"
 
     # ---- 知识库（KB / RAG）配置 ----
+    # KB 问答 LLM：api = OpenAI 兼容（DeepSeek 等，需 API Key）；ollama = 完全本地
+    kb_llm_provider: str = "api"
     # Embedding（siliconflow / openai / local）
     kb_embedding_provider: str = "siliconflow"
     kb_embedding_model: str = ""  # 空则按 provider 取默认模型
@@ -69,17 +69,6 @@ class Settings(BaseSettings):
     # 会话
     kb_history_turns: int = 8
     kb_max_context_chars: int = 60000
-    # Agent 模式
-    kb_agent_enabled: bool = True
-    kb_agent_max_rounds: int = 5
-    kb_agent_router: bool = True
-    kb_agent_clarify: bool = True
-    # 联网兜底（默认关闭）
-    kb_web_search_enabled: bool = False
-    # 目录监听（默认关闭）
-    kb_watch_enabled: bool = False
-    kb_watch_directory: str = ""
-    kb_watch_interval_sec: int = 5
 
     @property
     def llm_ready(self) -> bool:

@@ -7,12 +7,27 @@ yannick_vault 内部以 `cfg.retrieval.get("dense_top_k")` / `cfg.db_path` 方�
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Any
 
 from ..config import settings
 
 KB_SCHEMA_VERSION = 2
+
+
+def _threshold(env_key: str, local_default: float, default: float) -> float:
+    """取阈值：优先用户显式 .env；否则 local 嵌入时用更低的适配值。
+
+    bge-small（512 维）等本地模型的余弦量纲整体偏低（真实命中 ~0.45），
+    而 bge-m3 等 API 模型能到 0.6+，0.62 的默认拒答阈值会让 local 模式
+    几乎每次都「置信度过低」拒答。
+    """
+    raw = os.environ.get(env_key)
+    if raw:
+        return float(raw)
+    if settings.kb_embedding_provider == "local":
+        return local_default
+    return default
 
 
 class KbConfig:
@@ -44,7 +59,7 @@ class KbConfig:
             "top_k": 5,
         }
         self.llm = {
-            "provider": "api",
+            "provider": settings.kb_llm_provider,
             "stream": True,
             "temperature": 0.2,
             "max_tokens": 2048,
@@ -56,12 +71,22 @@ class KbConfig:
             "rrf_top_k": settings.kb_rrf_top_k,
             "final_top_k": settings.kb_final_top_k,
             "use_rerank": settings.kb_use_rerank,
-            "query_rewrite_threshold": settings.kb_query_rewrite_threshold,
+            "query_rewrite_threshold": _threshold(
+                "KB_QUERY_REWRITE_THRESHOLD",
+                0.45,
+                settings.kb_query_rewrite_threshold,
+            ),
             "query_rewrite_variants": settings.kb_query_rewrite_variants,
         }
         self.refusal = {
-            "absolute_threshold": settings.kb_refusal_absolute_threshold,
-            "margin": settings.kb_refusal_margin,
+            "absolute_threshold": _threshold(
+                "KB_REFUSAL_ABSOLUTE_THRESHOLD",
+                0.42,
+                settings.kb_refusal_absolute_threshold,
+            ),
+            "margin": _threshold(
+                "KB_REFUSAL_MARGIN", 0.05, settings.kb_refusal_margin
+            ),
         }
         self.splitter = {
             "chunk_size": settings.kb_chunk_size,
@@ -76,20 +101,6 @@ class KbConfig:
         self.chat = {
             "history_turns": settings.kb_history_turns,
             "max_context_chars": settings.kb_max_context_chars,
-        }
-        self.watch = {
-            "enabled": settings.kb_watch_enabled,
-            "directory": settings.kb_watch_directory,
-            "interval_sec": settings.kb_watch_interval_sec,
-        }
-        self.web_search = {"enabled": settings.kb_web_search_enabled}
-        self.agent = {
-            "enabled": settings.kb_agent_enabled,
-            "max_rounds": settings.kb_agent_max_rounds,
-            "router": settings.kb_agent_router,
-            "clarify": settings.kb_agent_clarify,
-            "temperature": 0.2,
-            "max_tokens": 2048,
         }
         self.schema_version = KB_SCHEMA_VERSION
 
@@ -114,14 +125,6 @@ class KbConfig:
         return self._resolve("logs_dir")
 
     @property
-    def storage_dir(self) -> Path:
-        return self._resolve("storage_dir")
-
-    @property
-    def userdict_path(self) -> Path:
-        return self._resolve("userdict")
-
-    @property
     def notes_dir(self) -> Path:
         return self._resolve("notes_dir")
 
@@ -134,9 +137,6 @@ class KbConfig:
             self.notes_dir,
         ):
             p.mkdir(parents=True, exist_ok=True)
-
-    def raw(self) -> dict[str, Any]:
-        return {"paths": dict(self._paths)}
 
 
 kb_config = KbConfig()

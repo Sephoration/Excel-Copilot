@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,13 +77,18 @@ def _is_punct(w: str) -> bool:
 
 
 class SparseIndex:
-    """BM25 稀疏索引，懒构建 + 增量追加。"""
+    """BM25 稀疏索引，懒构建 + 增量追加。
+
+    线程安全：重建加锁 + 双检，避免「启动预热」与「首次提问」同时重建
+    （旧实现会并发重建两份 35s+ 的索引，导致首问长时间无响应）。
+    """
 
     def __init__(self, database: db_mod.Database) -> None:
         self.db = database
         self._bm25 = None
         self._chunk_ids: list[int] = []
         self._known_count: int | None = None
+        self._rebuild_lock = threading.Lock()
         self._load_userdict()
 
     def _load_userdict(self) -> None:
@@ -94,11 +100,20 @@ class SparseIndex:
             pass
 
     def _ensure(self) -> None:
-        count = self.db.count_indexed_chunks()
-        if self._bm25 is None or count != self._known_count:
-            self.rebuild()
+        with self._rebuild_lock:
+            count = self.db.count_indexed_chunks()
+            if self._bm25 is None or count != self._known_count:
+                self._rebuild_unlocked()
 
     def rebuild(self) -> None:
+        """全量重建；若其他线程已重建到最新则直接跳过。"""
+        with self._rebuild_lock:
+            count = self.db.count_indexed_chunks()
+            if self._bm25 is not None and count == self._known_count:
+                return
+            self._rebuild_unlocked()
+
+    def _rebuild_unlocked(self) -> None:
         from rank_bm25 import BM25Okapi
 
         chunks = self.db.all_chunks_for_bm25()

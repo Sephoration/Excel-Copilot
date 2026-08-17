@@ -1,6 +1,6 @@
 """SQLite 访问层 —— 单一事实源（SSOT）。
 
-所有元数据、块、会话、消息都落在这里；ChromaDB 只是可重建的衍生索引。
+文件元数据、块、库记录都落在这里；ChromaDB 只是可重建的衍生索引。
 移植自 yannick_vault core/db.py，无外部依赖改动。
 """
 
@@ -21,8 +21,6 @@ ST_INDEXED = "indexed"
 ST_DUPLICATE = "duplicate"
 ST_FAILED = "failed"
 ST_EMBEDDING_FAILED = "embedding_failed"
-
-SCHEMA_VERSION = 2
 
 DEFAULT_LIBRARY = "default"
 
@@ -60,9 +58,12 @@ class Database:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # busy_timeout 必须先于 journal_mode=WAL：WAL 切换需要独占锁，
+        # 若另一实例正在持有写锁，默认 0 超时会立即抛错而非等待；
+        # 先设 busy_timeout 保证此时是「等锁」而不是「失败/挂起」。
+        self._conn.execute("PRAGMA busy_timeout=10000")
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA busy_timeout=10000")
         self._init_schema()
 
     # ---------- schema ----------
@@ -108,29 +109,9 @@ class Database:
                     name TEXT NOT NULL UNIQUE,
                     created_at REAL NOT NULL
                 );
-
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    citations_json TEXT,
-                    trace_id TEXT,
-                    latency_ms INTEGER,
-                    meta_json TEXT,
-                    created_at REAL NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
                 """
             )
-            # 轻量迁移：老库补 source_name / meta_json / library 列（不改 SCHEMA_VERSION）
+            # 轻量迁移：老库补 source_name / library 列
             cols = [
                 r["name"]
                 for r in self._conn.execute("PRAGMA table_info(files)").fetchall()
@@ -144,12 +125,6 @@ class Database:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_files_library ON files(library)"
             )
-            mcols = [
-                r["name"]
-                for r in self._conn.execute("PRAGMA table_info(messages)").fetchall()
-            ]
-            if "meta_json" not in mcols:
-                self._conn.execute("ALTER TABLE messages ADD COLUMN meta_json TEXT")
             # 确保默认库存在
             self._conn.execute(
                 "INSERT OR IGNORE INTO libraries (name, created_at) VALUES (?, ?)",
@@ -311,31 +286,28 @@ class Database:
                 ).fetchone()
             return self._to_file(row) if row else None
 
-    def files_needing_index(self) -> list[FileRecord]:
-        """断点续传：从 failed / embedding_failed / pending 继续。"""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM files WHERE status IN (?,?,?) ORDER BY id",
-                (ST_PENDING, ST_FAILED, ST_EMBEDDING_FAILED),
-            ).fetchall()
-            return [self._to_file(r) for r in rows]
-
-    def mark_all_indexed_as_pending(self) -> None:
-        """重建索引用：把已索引文件全部置回 pending。"""
-        with self._lock, self._conn:
-            self._conn.execute(
-                "UPDATE files SET status=? WHERE status=?",
-                (ST_PENDING, ST_INDEXED),
-            )
-
     def delete_file(self, file_id: int) -> None:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM files WHERE id=?", (file_id,))
 
-    def all_indexed_files(self) -> list[FileRecord]:
+    def reset_stale_indexing(self) -> int:
+        """把中断在 indexing 状态的文件置回 pending（可重新索引）。
+
+        进程崩溃 / 嵌入挂死会留下半截的 indexing 记录，向量与 BM25 都不含
+        它们；启动时调用一次，让它们进入可续传集合。
+        """
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE files SET status=? WHERE status=?",
+                (ST_PENDING, ST_INDEXING),
+            )
+            return int(cur.rowcount)
+
+    def files_needing_index(self) -> list[FileRecord]:
+        """待续传：pending（含从 indexing 恢复的）。"""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM files WHERE status=?", (ST_INDEXED,)
+                "SELECT * FROM files WHERE status=? ORDER BY id", (ST_PENDING,)
             ).fetchall()
             return [self._to_file(r) for r in rows]
 
@@ -377,13 +349,6 @@ class Database:
             ).fetchone()
             return self._to_chunk(row) if row else None
 
-    def get_doc_chunks(self, doc_id: int) -> list[Chunk]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM chunks WHERE doc_id=? ORDER BY chunk_index", (doc_id,)
-            ).fetchall()
-            return [self._to_chunk(r) for r in rows]
-
     def get_parent_chunk(self, chunk_id: int) -> Chunk | None:
         with self._lock:
             row = self._conn.execute(
@@ -394,8 +359,13 @@ class Database:
             return self._to_chunk(row) if row else None
 
     def all_chunks_for_bm25(self) -> list[Chunk]:
+        """BM25 语料：只取已索引文件的块（与 count_indexed_chunks 口径一致）。"""
         with self._lock:
-            rows = self._conn.execute("SELECT * FROM chunks ORDER BY id").fetchall()
+            rows = self._conn.execute(
+                "SELECT chunks.* FROM chunks JOIN files ON files.id=chunks.doc_id "
+                "WHERE files.status=? ORDER BY chunks.id",
+                (ST_INDEXED,),
+            ).fetchall()
             return [self._to_chunk(r) for r in rows]
 
     def delete_chunks_of_file(self, file_id: int) -> None:
@@ -438,98 +408,6 @@ class Database:
                 return json.loads(row["value"])
             except json.JSONDecodeError:
                 return row["value"]
-
-    # ---------- 会话 ----------
-    def create_session(self, title: str = "新对话") -> int:
-        now = time.time()
-        with self._lock, self._conn:
-            cur = self._conn.execute(
-                "INSERT INTO sessions (title,created_at,updated_at) VALUES (?,?,?)",
-                (title, now, now),
-            )
-            return int(cur.lastrowid)
-
-    def list_sessions(self) -> list[dict]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT s.*, (SELECT COUNT(*) FROM messages m WHERE m.session_id=s.id) msg_count "
-                "FROM sessions s ORDER BY s.updated_at DESC"
-            ).fetchall()
-            return [dict(r) for r in rows]
-
-    def rename_session(self, session_id: int, title: str) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                "UPDATE sessions SET title=? WHERE id=?", (title, session_id)
-            )
-
-    def touch_session(self, session_id: int) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                "UPDATE sessions SET updated_at=? WHERE id=?", (time.time(), session_id)
-            )
-
-    def delete_session(self, session_id: int) -> None:
-        with self._lock, self._conn:
-            self._conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
-
-    # ---------- 消息 ----------
-    def add_message(
-        self,
-        session_id: int,
-        role: str,
-        content: str,
-        citations: list[dict] | None = None,
-        trace_id: str | None = None,
-        latency_ms: int | None = None,
-        meta: dict | None = None,
-    ) -> int:
-        with self._lock, self._conn:
-            cur = self._conn.execute(
-                "INSERT INTO messages (session_id,role,content,citations_json,trace_id,latency_ms,meta_json,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (
-                    session_id,
-                    role,
-                    content,
-                    json.dumps(citations, ensure_ascii=False) if citations else None,
-                    trace_id,
-                    latency_ms,
-                    json.dumps(meta, ensure_ascii=False) if meta else None,
-                    time.time(),
-                ),
-            )
-            return int(cur.lastrowid)
-
-    def get_messages(self, session_id: int) -> list[dict]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM messages WHERE session_id=? ORDER BY id", (session_id,)
-            ).fetchall()
-            out = []
-            for r in rows:
-                d = dict(r)
-                d["citations"] = (
-                    json.loads(d.pop("citations_json"))
-                    if d.get("citations_json")
-                    else []
-                )
-                d["meta"] = json.loads(d.pop("meta_json")) if d.get("meta_json") else {}
-                out.append(d)
-            return out
-
-    def last_messages(self, session_id: int, n: int) -> list[dict]:
-        return self.get_messages(session_id)[-n:]
-
-    def recent_latencies(self, n: int = 100) -> list[int]:
-        """返回最近 n 条 assistant 消息的 latency_ms（升序时间）。"""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT latency_ms FROM messages WHERE role='assistant' "
-                "AND latency_ms IS NOT NULL ORDER BY id DESC LIMIT ?",
-                (n,),
-            ).fetchall()
-            return [int(r["latency_ms"]) for r in rows]
 
     # ---------- 统计 ----------
     def stats(self) -> dict:
@@ -584,6 +462,20 @@ class Database:
             token_len=row["token_len"],
             meta=meta,
         )
+
+    def vacuum(self) -> None:
+        """压缩 SQLite 文件：重写回收空闲页 + 截断 WAL（删除后调用）。
+
+        顺序必须 VACUUM 在前、checkpoint(TRUNCATE) 在后：WAL 模式下
+        VACUUM 的页重写会写进 WAL，若先截断再 VACUUM，WAL 会重新涨回来
+        （实测残留 17MB）。VACUUM 后截断才能把文件压到最小。
+        """
+        with self._lock, self._conn:
+            self._conn.execute("VACUUM")
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.OperationalError:
+                pass  # 无 WAL 或处于写事务中时可忽略
 
     def close(self) -> None:
         with self._lock:

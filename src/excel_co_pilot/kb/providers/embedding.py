@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import os
+import threading
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -85,13 +88,29 @@ class LocalEmbedding:
     # 国内网络通常连不上 huggingface.co，默认走 hf-mirror.com 镜像；
     # 用户已显式设置 HF_ENDPOINT 时尊重其选择。
     HF_MIRROR = "https://hf-mirror.com"
+    MODEL = "BAAI/bge-small-zh-v1.5"
 
     def __init__(self, **kwargs: Any) -> None:
         self.dim = kwargs.get("dim", 512)
         self._model = None
+        # 下载/加载只允许一个线程进行，其余线程在此等待，避免并发重复下载
+        self._load_lock = threading.Lock()
+
+    @classmethod
+    def is_cached(cls) -> bool:
+        """模型是否已下载到 HF 缓存（判断能否安全地后台预载，避免联网挂死）。"""
+        name = cls.MODEL.replace("/", "--")
+        root = Path(os.path.expanduser("~")) / ".cache" / "huggingface" / "hub" / (
+            f"models--{name}"
+        )
+        return (root / "snapshots").is_dir()
 
     def _ensure(self):
-        if self._model is None:
+        if self._model is not None:
+            return self._model
+        with self._load_lock:
+            if self._model is not None:
+                return self._model
             import os
 
             if "HF_ENDPOINT" not in os.environ:
@@ -103,7 +122,7 @@ class LocalEmbedding:
                     "本地嵌入需要安装 sentence-transformers（uv pip install sentence-transformers，"
                     "或 uv sync --extra local）"
                 ) from e
-            self._model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
+            self._model = SentenceTransformer(self.MODEL)
             get_dim = getattr(
                 self._model, "get_embedding_dimension", None
             ) or self._model.get_sentence_embedding_dimension

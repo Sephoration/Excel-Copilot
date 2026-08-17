@@ -3,16 +3,8 @@
 from __future__ import annotations
 
 
-class AppError(Exception):
-    """应用级基础异常。"""
-
-
-class FileValidationError(AppError):
+class FileValidationError(Exception):
     """文件校验失败（类型/大小不合法）。"""
 
 
-class LLMNotConfiguredError(AppError):
-    """未配置 LLM 凭证。"""
-
-
-__all__ = ["AppError", "FileValidationError", "LLMNotConfiguredError"]
+__all__ = ["FileValidationError"]

@@ -177,3 +177,48 @@ def test_qa_refuses_out_of_scope(services: Services):
     # 与知识库完全无关的问题：检索置信度过低 → 应拒答（不臆造）
     r = services.qa.answer("今天上海天气怎么样？")
     assert r.refused, f"应拒答，实际 answer={r.answer!r} hits={len(r.hits)}"
+
+
+def test_chroma_does_not_store_documents(services: Services):
+    """新代码不再把全文 documents 写进 Chroma（SSOT 在 kb.db），防体积膨胀。"""
+    n = services.indexer.count()
+    assert n > 0
+    probe = services.indexer._collection.get(limit=1, include=["documents"])
+    docs = probe.get("documents") or []
+    assert docs and docs[0] is None, f"Chroma 不应存 documents，实际 {docs!r}"
+
+
+def test_compact_rebuilds_and_removes_documents(services: Services):
+    """旧库迁移：Chroma 已有 documents 时，compact() 重建去掉全文并保持 count。"""
+    # 人为向集合写入 documents，模拟旧版本遗留
+    old = services.indexer._collection.get(include=["embeddings", "metadatas"])
+    n = len(old["ids"])
+    services.indexer._collection.add(
+        ids=[f"legacy:{i}" for i in range(n)],
+        embeddings=old["embeddings"],
+        metadatas=old["metadatas"],
+        documents=[f"doc {i}" for i in range(n)],
+    )
+    before = services.indexer.count()  # 原记录 + legacy 记录
+    docs_before = services.indexer._collection.get(include=["documents"])[
+        "documents"
+    ]
+    assert any(d is not None for d in docs_before)  # 前置：确实存在 documents
+
+    result = services.indexer.compact()
+    assert result["chroma"] == "rebuilt"
+    assert result["removed"] == before
+
+    assert services.indexer.count() == before  # count 不变
+    docs_after = services.indexer._collection.get(include=["documents"])[
+        "documents"
+    ]
+    assert not any(d is not None for d in docs_after)  # 重建后 documents 已清除
+
+    # 再次 compact 应为幂等空操作
+    again = services.indexer.compact()
+    assert again["chroma"] == "already_compact"
+
+    # 重建后检索仍正常
+    hits = services.retriever.hybrid_search("bge-m3 向量模型是什么")
+    assert len(hits) > 0

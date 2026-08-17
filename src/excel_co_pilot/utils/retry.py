@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import functools
 import time
-from typing import Any, Callable, TypeVar
-
-F = TypeVar("F", bound=Callable[..., Any])
+from collections.abc import Callable
+from typing import Any
 
 _DEFAULT_MAX_RETRIES = 3
 
 
-def retry(
+def retry[F: Callable[..., Any]](
     fn: F | None = None, *, max_retries: int = _DEFAULT_MAX_RETRIES
 ) -> F | Callable[[F], F]:
     """重试被装饰函数：失败后按 1.5s * attempt 指数退避，超过次数抛最后一次异常。"""

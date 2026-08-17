@@ -16,12 +16,8 @@ _trace_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
-def set_trace_id(trace_id: str) -> None:
+def set_trace_id(trace_id: str | None) -> None:
     _trace_var.set(trace_id)
-
-
-def get_trace_id() -> str | None:
-    return _trace_var.get()
 
 
 class _KbLogger:
@@ -46,12 +42,9 @@ class _KbLogger:
     def error(self, event: str, **kwargs: Any) -> None:
         self._emit("error", event, **kwargs)
 
-    def debug(self, event: str, **kwargs: Any) -> None:
-        self._emit("debug", event, **kwargs)
-
 
 def get_logger(name: str = "kb") -> _KbLogger:
     return _KbLogger(name)
 
 
-__all__ = ["get_logger", "get_trace_id", "set_trace_id"]
+__all__ = ["get_logger", "set_trace_id"]

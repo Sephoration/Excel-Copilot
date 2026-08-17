@@ -15,15 +15,14 @@ if hasattr(sys.stderr, "reconfigure"):
 REQUIRED = [
     "pandas",
     "numpy",
-    "plotly",
     "gradio",
     "fastapi",
-    "langgraph",
     "openai",
     "pdfplumber",
-    "reportlab",
     "loguru",
     "pydantic_settings",
+    "chromadb",
+    "jieba",
 ]
 
 
@@ -49,7 +48,7 @@ def main() -> int:
     storage = Path(settings.storage_dir)
     print(f"存储目录: {storage}")
     storage.mkdir(parents=True, exist_ok=True)
-    for sub in ("uploads", "cache", "exports", "logs"):
+    for sub in ("exports", "logs"):
         (storage / sub).mkdir(parents=True, exist_ok=True)
     print("✅ 存储目录就绪")
     return 0

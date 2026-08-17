@@ -5,7 +5,3 @@
 - 日志统一走 loguru（适配 structlog 风格调用）
 - 存储目录统一在 settings.storage_dir / "kb" 下
 """
-
-from .services import Services
-
-__all__ = ["Services"]

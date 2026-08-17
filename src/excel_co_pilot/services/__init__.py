@@ -1,3 +1,1 @@
-from .llm_gateway import LLMError, LLMGateway
-
-__all__ = ["LLMError", "LLMGateway"]
+"""服务层：LLM 网关。"""

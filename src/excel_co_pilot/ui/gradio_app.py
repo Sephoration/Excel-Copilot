@@ -21,7 +21,10 @@ from .progress import PROGRESS_CSS, progress_html
 
 _CSS = """
 /* ---------- 全局 ---------- */
-.gradio-container { max-width: 880px !important; margin: 0 auto !important; }
+/* 全局：固定高度内容区 + 稳定滚动条，Tab 切换不抖动不变形 */
+.gradio-container { max-width: 1000px !important; margin: 0 auto !important; }
+html { scrollbar-gutter: stable; }
+.tabs { min-height: 620px !important; }
 body { background: linear-gradient(160deg, #0f172a 0%, #1e293b 100%) fixed !important; }
 footer { display: none !important; }
 .gradio-container .tabs { border: none !important; background: transparent !important; }
@@ -69,6 +72,64 @@ footer { display: none !important; }
 .gr-box, .gr-panel { background: rgba(30, 41, 59, .85) !important; border-color: rgba(148,163,184,.15) !important; border-radius: 12px !important; }
 label, .gr-text, .gr-markdown { color: #e2e8f0; }
 .gr-button-primary { background: linear-gradient(90deg, #3b82f6, #8b5cf6) !important; border: none !important; }
+
+/* ---------- 知识库左窗紧凑化 ---------- */
+.kb-side { gap: .5rem !important; }
+.kb-side-head { margin: .2rem 0 0 !important; }
+.kb-side-head h3 { font-size: 1.02rem !important; margin: .3rem 0 .15rem !important; color: #e2e8f0 !important; }
+.kb-side label, .kb-side .label-wrap { font-size: .82rem !important; }
+.kb-side .gr-button { flex-shrink: 1 !important; }
+/* ---------- 知识库：环境窗格导航 ---------- */
+.env-panes label {
+    display: block !important;
+    border: 1px solid rgba(148,163,184,.22) !important;
+    border-radius: 10px !important;
+    margin: .3rem 0 !important;
+    padding: .55rem .75rem !important;
+    cursor: pointer !important;
+    transition: all .15s ease !important;
+    background: rgba(30, 41, 59, .6) !important;
+    font-size: .95rem !important;
+}
+.env-panes label:hover {
+    border-color: #60a5fa !important;
+    transform: translateX(3px);
+}
+.env-panes label:has(input:checked) {
+    border-color: #8b5cf6 !important;
+    background: rgba(139, 92, 246, .16) !important;
+    box-shadow: 0 0 12px rgba(139, 92, 246, .35);
+}
+.env-panes input[type="radio"] { accent-color: #8b5cf6 !important; }
+/* ---------- 数据库详情面板 ---------- */
+.kb-detail {
+    border: 1px solid rgba(148,163,184,.18) !important;
+    border-radius: 12px !important;
+    padding: .4rem .7rem .6rem !important;
+    margin-top: .5rem !important;
+    background: rgba(15, 23, 42, .35) !important;
+}
+/* ---------- 右窗问答（美化边框） ---------- */
+.kb-chat-box {
+    border: 1px solid rgba(139, 92, 246, .5) !important;
+    border-radius: 14px !important;
+    padding: .8rem .9rem .9rem !important;
+    background: rgba(30, 41, 59, .55) !important;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .35), inset 0 0 0 1px rgba(139,92,246,.08) !important;
+}
+.kb-chat-box .gr-chatbot {
+    border-radius: 10px !important;
+    border: 1px solid rgba(148,163,184,.2) !important;
+}
+.kb-answer {
+    border-left: 4px solid #8b5cf6 !important;
+    background: rgba(139, 92, 246, .1) !important;
+    border-radius: 0 10px 10px 0 !important;
+    padding: .7rem .9rem !important;
+    margin-top: .5rem !important;
+    font-size: .95rem !important;
+    line-height: 1.65 !important;
+}
 """ + PROGRESS_CSS
 
 
@@ -230,31 +291,39 @@ def _analysis_workspace(state: gr.State) -> None:
             session.clear_context()
             return "🗑 上下文已清空", "（尚未发送任何文件）"
 
+        def _to_messages(history: list) -> list[dict]:
+            """Gradio 6 Chatbot 只接受 messages 格式：[(u, a), ...] → dict 列表。"""
+            msgs: list[dict] = []
+            for u, a in history:
+                msgs.append({"role": "user", "content": u})
+                msgs.append({"role": "assistant", "content": a})
+            return msgs
+
         def on_ask(question: str, history: list, session: Session):
             if not question or not question.strip():
-                yield history, progress_html("", None), ""
+                yield _to_messages(history or []), progress_html("", None), "", history or []
                 return
             history = history or []
-            llm_history = []
-            for u, a in history:
-                llm_history.append({"role": "user", "content": u})
-                llm_history.append({"role": "assistant", "content": a})
-            yield history, progress_html("⏳ 已收到问题，正在整理上下文…", 20), ""
-            yield history, progress_html("⏳ AI 正在回答…", 60), ""
+            llm_history = _to_messages(history)
+            yield _to_messages(history), progress_html("⏳ 已收到问题，正在整理上下文…", 20), "", history
+            yield _to_messages(history), progress_html("⏳ AI 正在回答…", 60), "", history
             try:
                 reply = session.simple_chat(question.strip(), history=llm_history)
             except Exception as exc:
                 reply = f"❌ 出错了：{exc}"
             new_history = history + [(question.strip(), reply)]
-            yield new_history, progress_html("✅ 回答完成", 100), ""
+            yield _to_messages(new_history), progress_html("✅ 回答完成", 100), "", new_history
 
         send_btn.click(on_send, [upload, state], [context_md, context_md])
         clear_btn.click(on_clear, [state], [context_md, context_md])
+        # show_progress="hidden"：关掉 Gradio 每个组件的队列角标，只留自定义进度条
         ask_btn.click(
-            on_ask, [msg, chat_history, state], [chatbot, ai_progress, msg]
+            on_ask, [msg, chat_history, state], [chatbot, ai_progress, msg, chat_history],
+            show_progress="hidden",
         )
         msg.submit(
-            on_ask, [msg, chat_history, state], [chatbot, ai_progress, msg]
+            on_ask, [msg, chat_history, state], [chatbot, ai_progress, msg, chat_history],
+            show_progress="hidden",
         )
 
 
@@ -273,6 +342,17 @@ def build_ui() -> gr.Blocks:
         session = Session()
         state = gr.State(session)
 
+        # 启动时后台预热知识库：预加载嵌入模型 + 预建 BM25 索引，
+        # 让用户第一次提问时数据库已就绪，不用现场构建
+        import threading
+
+        def _warm_up():
+            from ..kb.services import get_services
+
+            get_services().warm_up()
+
+        threading.Thread(target=_warm_up, daemon=True).start()
+
         with gr.Tabs() as tabs:
             with gr.Tab("🏠 首页", id="home"):
                 _home_view(session, tabs)
@@ -289,4 +369,4 @@ APP_CSS = _CSS
 APP_THEME = gr.themes.Soft(primary_hue="blue", neutral_hue="slate")
 
 
-__all__ = ["build_ui", "APP_CSS", "APP_THEME"]
+__all__ = ["APP_CSS", "APP_THEME", "build_ui"]

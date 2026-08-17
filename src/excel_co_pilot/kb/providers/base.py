@@ -33,7 +33,6 @@ class LLM(Protocol):
     """文本生成。stream=True 时逐片段产出。"""
 
     name: str
-    supports_tools: bool = False
 
     def complete(
         self,
@@ -42,21 +41,6 @@ class LLM(Protocol):
         stream: bool = True,
         **kwargs,
     ) -> Iterator[str] | str: ...
-
-    def chat(
-        self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        stream: bool = True,
-        **kwargs,
-    ) -> Iterator[dict] | dict:
-        """Function Calling 对话接口。
-
-        - stream=False 返回 dict：{"role":"assistant","content":str,"tool_calls":[...]|None}
-        - stream=True 返回事件生成器：
-            {"type":"delta","text":str}   /   {"type":"tool_calls","tool_calls":[...]}
-        """
-        ...
 
 
 # ---------- 注册表 ----------

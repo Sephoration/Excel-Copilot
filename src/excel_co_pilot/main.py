@@ -14,12 +14,9 @@ from fastapi import UploadFile
 from loguru import logger
 
 from .config import settings
-from .core.session import SessionManager
 from .ui.gradio_app import APP_CSS, APP_THEME, build_ui
 from .utils.exceptions import FileValidationError
 from .utils.logger import setup_logger
-
-_sessions = SessionManager()
 
 
 async def _stream_to_disk(file: UploadFile, dest: Path) -> None:
@@ -42,46 +39,25 @@ async def _stream_to_disk(file: UploadFile, dest: Path) -> None:
 
 def create_app():
     """构建 FastAPI 应用（REST 接口，供独立部署）。"""
-    from fastapi import FastAPI, File, UploadFile
+    from fastapi import FastAPI, File
     from pydantic import BaseModel
 
     app = FastAPI(title="Excel Co-Pilot API", version="0.1.0")
 
-    class ChatRequest(BaseModel):
-        session_id: str
-        message: str
+    @app.on_event("startup")
+    def _startup_warm_up() -> None:
+        """启动时后台预热知识库索引，保证首次问答即就绪。"""
+        import threading
 
-    class ChatResponse(BaseModel):
-        reply: str
-        plot_html: str | None = None
+        from .kb.services import get_services
+
+        threading.Thread(target=get_services().warm_up, daemon=True).start()
 
     @app.get("/health")
     def health() -> dict:
         from .services.llm_gateway import LLMGateway
 
         return {"status": "ok", "llm_ready": LLMGateway.available()}
-
-    @app.post("/upload")
-    async def upload(session_id: str, file: UploadFile = File(...)) -> dict:
-        session = _sessions.get(session_id)
-        upload_dir = settings.storage_dir / "uploads" / session_id
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        dest = upload_dir / (file.filename or "upload.bin")
-        try:
-            await _stream_to_disk(file, dest)
-            alias = session.load(dest)
-        except FileValidationError as exc:
-            return {"error": str(exc)}
-        except Exception as exc:
-            dest.unlink(missing_ok=True)
-            return {"error": str(exc)}
-        return {"alias": alias, "file": file.filename}
-
-    @app.post("/chat")
-    def chat(req: ChatRequest) -> ChatResponse:
-        session = _sessions.get(req.session_id)
-        result = session.chat(req.message)
-        return ChatResponse(reply=result["reply"], plot_html=result.get("plot_html"))
 
     @app.get("/kb/health")
     def kb_health() -> dict:
@@ -104,12 +80,15 @@ def create_app():
         if not svc.db.library_exists(library):
             svc.db.create_library(library)
         svc.cfg.raw_dir.mkdir(parents=True, exist_ok=True)
-        dest = svc.cfg.raw_dir / (file.filename or "upload.bin")
+        # 只取文件名部分，防止 ../../ 路径穿越写出目录
+        safe_name = Path(file.filename or "upload.bin").name
+        dest = svc.cfg.raw_dir / safe_name
         try:
             await _stream_to_disk(file, dest)
         except FileValidationError as exc:
             return {"error": str(exc)}
-        result = svc.ingest.process_file(dest, source_name=file.filename, library=library)
+        result = svc.ingest.process_file(dest, source_name=safe_name, library=library)
+        svc.refresh_indexes()  # 导入后立即刷新检索索引，保持可问答状态
         return result
 
     class KbAskRequest(BaseModel):
@@ -137,11 +116,21 @@ def create_app():
 
 
 def main() -> None:
-    """默认入口：启动 Gradio 界面（http://localhost:7861，可用 GRADIO_PORT 覆盖）。"""
+    """默认入口：启动 Gradio 界面（http://localhost:7861，可用 --port / GRADIO_PORT 覆盖）。"""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Excel Co-Pilot 界面")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument(
+        "--port", type=int, default=int(os.environ.get("GRADIO_PORT", "7861"))
+    )
+    args = parser.parse_args()
+
     setup_logger()
     logger.info("启动 Excel Co-Pilot 界面")
     demo = build_ui()
-    demo.queue()
+    # 并发上限：导入索引是分钟级长任务，不能阻塞问答等其他事件
+    demo.queue(default_concurrency_limit=8)
     # 禁用缓存：改版后浏览器必须拿到最新界面，避免旧布局残留
     from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -154,8 +143,8 @@ def main() -> None:
 
     demo.app.add_middleware(NoCacheMiddleware)
     demo.launch(
-        server_name="0.0.0.0",
-        server_port=int(os.environ.get("GRADIO_PORT", "7861")),
+        server_name=args.host,
+        server_port=args.port,
         show_error=True,
         css=APP_CSS,
         theme=APP_THEME,

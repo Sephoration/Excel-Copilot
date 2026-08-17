@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from typing import Any
 
 from loguru import logger
 
@@ -75,18 +74,4 @@ class LLMGateway:
                     time.sleep(1.5 * (attempt + 1))
         raise LLMError(f"LLM 调用失败: {last_error}")
 
-    def extract_json(self, content: str) -> dict[str, Any]:
-        text = content.strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            text = "\n".join(lines).strip()
-        start, end = text.find("{"), text.rfind("}")
-        if start == -1 or end == -1:
-            raise LLMError(f"LLM 输出中未找到 JSON: {content[:200]}")
-        import json
-
-        return json.loads(text[start : end + 1])
+    # 注：LLM 结构化输出（JSON 抽取等）由知识库 providers/llm.py 处理。

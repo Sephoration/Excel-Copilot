@@ -14,9 +14,6 @@ from dataclasses import dataclass, field
 
 from .db import Chunk
 from .loader import ContentBlock
-from .logging import get_logger
-
-log = get_logger("splitter")
 
 
 def estimate_tokens(text: str) -> int:
@@ -35,11 +32,12 @@ def _split_paragraphs(text: str) -> list[str]:
 @dataclass
 class _Section:
     title: str = ""
-    paragraphs: list[str] = field(default_factory=list)
+    # (段落文本, 页码)：页码来自 ContentBlock，需贯通到叶子块供引用溯源
+    paragraphs: list[tuple[str, int | None]] = field(default_factory=list)
 
     @property
     def text(self) -> str:
-        return "\n\n".join(self.paragraphs)
+        return "\n\n".join(p for p, _ in self.paragraphs)
 
 
 def _build_sections(blocks: list[ContentBlock]) -> list[_Section]:
@@ -59,7 +57,9 @@ def _build_sections(blocks: list[ContentBlock]) -> list[_Section]:
         if not sections:
             sections.append(_Section(title=current_title()))
         if b.text.strip():
-            sections[-1].paragraphs.extend(_split_paragraphs(b.text))
+            sections[-1].paragraphs.extend(
+                (p, b.page) for p in _split_paragraphs(b.text)
+            )
     if not sections:
         sections = [_Section(title="")]
     return sections
@@ -87,12 +87,12 @@ def split_blocks(
     idx = 0
     for sec in sections:
         parent_chunks, parent_offsets = _split_parent(sec, max_parent_tokens, new_id)
-        leaf_chunks, leaf_offsets = _split_leaves(
+        leaf_chunks, leaf_pages, leaf_offsets = _split_leaves(
             sec, chunk_size, overlap, min_chunk_size
         )
 
         out.extend(parent_chunks)
-        for leaf, offset in zip(leaf_chunks, leaf_offsets):
+        for leaf, page, offset in zip(leaf_chunks, leaf_pages, leaf_offsets):
             parent_i = _locate_parent(offset, parent_offsets)
             parent = parent_chunks[parent_i] if parent_chunks else None
             out.append(
@@ -102,6 +102,7 @@ def split_blocks(
                     parent_id=parent.id if parent else None,
                     index=idx,
                     text=leaf,
+                    page=page,
                     token_len=estimate_tokens(leaf),
                 )
             )
@@ -147,7 +148,7 @@ def _split_parent(
         cur_tokens = 0
         buf = []
 
-    for para in sec.paragraphs:
+    for para, _page in sec.paragraphs:
         parts = _hard_split_text(para, max_tokens)
         for piece in parts:
             piece_tokens = estimate_tokens(piece)
@@ -175,48 +176,56 @@ def _split_parent(
 
 def _split_leaves(
     sec: _Section, chunk_size: int, overlap: int, min_chunk_size: int
-) -> tuple[list[str], list[int]]:
-    """叶子块：按 token 预算累积段落，带 overlap，过短合并。"""
+) -> tuple[list[str], list[int | None], list[int]]:
+    """叶子块：按 token 预算累积段落，带 overlap，过短合并。
+
+    返回 (文本列表, 页码列表, 偏移列表)；页码取块内首个段落的来源页，
+    供引用溯源显示「第 N 页」。
+    """
     title = _prefix_title(sec.title)
     head = f"【{title}】\n" if title else ""
     leaves: list[str] = []
+    pages: list[int | None] = []
     offsets: list[int] = []
 
-    cur_buf: list[str] = []
+    cur_buf: list[tuple[str, int | None]] = []  # (段落, 页码)
     cur_tokens = 0
     offset = 0
 
     def flush(force: bool = False):
         nonlocal cur_buf, cur_tokens
-        text = head + "\n\n".join(cur_buf)
+        text = head + "\n\n".join(t for t, _ in cur_buf)
         tokens = estimate_tokens(text)
         if not force and tokens < min_chunk_size and leaves:
-            leaves[-1] = leaves[-1] + "\n\n" + "\n\n".join(cur_buf)
+            # 过短块并入上一块：页码沿用上一块（其内容起始页）
+            leaves[-1] = leaves[-1] + "\n\n" + "\n\n".join(t for t, _ in cur_buf)
             return
         leaves.append(text)
+        pages.append(next((p for _, p in cur_buf if p is not None), None))
         offsets.append(max(offset - len(text), 0))
         keep = _tail_tokens(cur_buf, overlap)
         cur_buf = keep
-        cur_tokens = estimate_tokens(head + "\n\n".join(keep))
+        cur_tokens = estimate_tokens(head + "\n\n".join(t for t, _ in keep))
 
-    def push(piece: str, piece_tokens: int):
+    def push(piece: str, piece_tokens: int, page: int | None):
         nonlocal cur_tokens, offset
         if cur_tokens + piece_tokens > chunk_size and cur_buf:
             flush()
-        cur_buf.append(piece)
+        cur_buf.append((piece, page))
         cur_tokens += piece_tokens + 2
         offset += len(piece) + 2
 
-    for para in sec.paragraphs:
+    for para, page in sec.paragraphs:
         parts = _hard_split_text(para, chunk_size)
         for piece in parts:
-            push(piece, estimate_tokens(piece))
+            push(piece, estimate_tokens(piece), page)
     if cur_buf:
         flush(force=True)
     if not leaves:
         leaves.append(head or "(空章节)")
+        pages.append(None)
         offsets.append(0)
-    return leaves, offsets
+    return leaves, pages, offsets
 
 
 def _hard_split_text(text: str, max_tokens: int) -> list[str]:
@@ -237,14 +246,16 @@ def _hard_split_text(text: str, max_tokens: int) -> list[str]:
     return [p for p in parts if p.strip()] or [text]
 
 
-def _tail_tokens(buf: list[str], overlap_tokens: int) -> list[str]:
-    """取末尾近似 overlap 的段落。"""
+def _tail_tokens(
+    buf: list[tuple[str, int | None]], overlap_tokens: int
+) -> list[tuple[str, int | None]]:
+    """取末尾近似 overlap 的段落（保留页码）。"""
     if overlap_tokens <= 0 or not buf:
         return []
     acc, keep = 0, []
-    for p in reversed(buf):
-        acc += estimate_tokens(p)
-        keep.append(p)
+    for item in reversed(buf):
+        acc += estimate_tokens(item[0])
+        keep.append(item)
         if acc >= overlap_tokens:
             break
     return list(reversed(keep))

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -196,37 +197,62 @@ class IngestEngine:
                 results.append(self.process_file(p, sn, library))
         return results
 
-    def scan_dir(self, directory: Path) -> list[Path]:
-        exts = tuple(self.cfg.ingest.get("allowed_exts", supported_exts()))
-        return sorted(
-            p for p in directory.rglob("*") if p.is_file() and p.suffix.lower() in exts
-        )
+    def resume_pending(self) -> list[dict]:
+        """断点续传：重试 pending（含从 indexing 恢复的）文件。
 
-    def ingest_directory(self, directory: Path) -> list[dict]:
-        files = self.scan_dir(directory)
-        log.info("ingest_dir_scan", dir=str(directory), files=len(files))
-        return self.ingest_paths(files)
-
-    def resume_failed(self) -> list[dict]:
-        """断点续传：重试 failed / embedding_failed。"""
+        按文件所在库分组续传——upsert_file 用 (path, library) 定位记录，
+        若强制用默认库会因库不匹配而新建重复记录。
+        """
         files = self.db.files_needing_index()
-        return self.ingest_paths([Path(f.path) for f in files])
+        if not files:
+            return []
+        log.info("resume_pending_start", n=len(files))
+        results: list[dict] = []
+        by_lib: dict[str, list] = {}
+        for f in files:
+            by_lib.setdefault(f.library, []).append(f)
+        for lib, group in by_lib.items():
+            results.extend(
+                self.ingest_paths([Path(f.path) for f in group], library=lib)
+            )
+        return results
+
+    def ingest_paths_iter(
+        self,
+        paths: list[Path],
+        source_names: list[str] | None = None,
+        library: str = db_mod.DEFAULT_LIBRARY,
+    ) -> Iterator[tuple[int, int, dict]]:
+        """逐文件产出 (已完成数, 总数, 结果)，供 UI 显示索引进度百分比。
+
+        与 ingest_paths 行为一致，只是边跑边 yield，不等到全部结束。
+        """
+        names = source_names if source_names is not None else [None] * len(paths)
+        if len(names) != len(paths):
+            names = [None] * len(paths)
+        workers = self.cfg.ingest.get("workers", 8)
+        if workers > 1 and len(paths) > 1:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = {
+                    ex.submit(self.process_file, p, names[i], library): (p, names[i])
+                    for i, p in enumerate(paths)
+                }
+                for completed, f in enumerate(as_completed(futures), start=1):
+                    try:
+                        yield completed, len(paths), f.result()
+                    except Exception as e:  # 理论不会发生
+                        yield completed, len(paths), {
+                            "path": str(futures[f][0]),
+                            "source_name": futures[f][1],
+                            "library": library,
+                            "status": ST_FAILED,
+                            "error": str(e),
+                        }
+        else:
+            for i, (p, sn) in enumerate(zip(paths, names), start=1):
+                yield i, len(paths), self.process_file(p, sn, library)
 
     # ---------- 删除 ----------
-    def delete_file(self, file_id: int) -> None:
-        file = self.db.get_file(file_id)
-        if not file:
-            return
-        self.indexer.delete_doc(file_id)
-        self.db.delete_chunks_of_file(file_id)
-        self.db.delete_file(file_id)
-        if file.path.startswith(str(self.cfg.raw_dir)):
-            try:
-                Path(file.path).unlink(missing_ok=True)
-            except OSError as e:  # pragma: no cover
-                log.warning("raw_delete_failed", path=file.path, error=str(e))
-        log.info("file_deleted", file_id=file_id, path=file.path)
-
     def delete_library(self, name: str) -> int:
         """删除整个库：向量 + 元数据 + 原始文件。返回删除的文件数。"""
         doc_ids = self.db.library_file_ids(name)

@@ -1,10 +1,10 @@
 ### 📊 Excel Co-Pilot
 
-本地优先、AI 驱动的 **数据与知识问答工作站**：一边用中文自然语言操作内存中的表格（清洗 / 计算 / 多表关联 / 交互式图表），一边把 PDF / Word / Markdown / Excel 文档变成可检索的知识库，基于 RAG 用中文提问并带回溯引用。
+本地优先、AI 驱动的**数据与知识问答工作站**：一边把 Excel / CSV / PDF / Word 等文件直接发进上下文、用中文提问（简单问答），一边把文档变成可检索的知识库，基于 RAG 用中文提问并带回溯引用。
 
 [![Python](https://img.shields.io/badge/Python-3.14-blue.svg)](https://www.python.org/)
 [![uv](https://img.shields.io/badge/uv-package%20manager-8B89CC.svg)](https://docs.astral.sh/uv/)
-[![Tests](https://img.shields.io/badge/tests-46%20passed-brightgreen.svg)](#-测试)
+[![Tests](https://img.shields.io/badge/tests-19%20passed-brightgreen.svg)](#-测试)
 
 > [!note] ==数据不出域==：所有处理都在本地内存完成，不主动上传云端（调用云端模型时自行评估）。
 
@@ -12,27 +12,24 @@
 
 ### ✨ 特性
 
-**📊 表格数据分析（Tab 1）**
+**📊 单次问答（Tab 1）**
 
 | 能力 | 说明 |
 | :--- | :--- |
 | 多格式接入 | CSV / Excel / JSON / Parquet / PDF 表格（自动识别编码，GBK 不乱码） |
-| 自动 EDA | 行 / 列数、空值率、唯一值、类型推断、离群值（Z-score > 3）预检 |
-| 自然语言转代码 | LangGraph 状态机 Planner → Executor → Reflector → Responder，出错自动反思重试 |
-| 多表关联 + 回滚 | 支持多步操作，结果写回数据池；最多 20 步快照，可撤销 / 重置 |
-| 交互式图表 | Plotly 自动推荐图表类型，可缩放、悬停看值 |
-| 报告导出 | 一键导出 HTML + PDF（中文支持） |
-| 安全沙箱 | AST 白名单 + 文件读写拦截 + 线程超时，杜绝 import / 文件外带 / 危险调用 |
+| 文件进上下文 | 发送多少文件，就把多少文件解构成文本追加进上下文，边问边答 |
+| 上下文问答 | 结合文件内容直接问答，带最近若干轮历史（防上下文爆炸） |
 
 **📚 知识库问答（Tab 2，RAG）**
 
 | 能力 | 说明 |
 | :--- | :--- |
-| 多格式摄入 | PDF / Word / Markdown / TXT / PPT / Excel，MD5 去重 + 增量 + 断点续传 |
+| 多格式摄入 | PDF / Word / Markdown / TXT / PPT / Excel，MD5 去重 + 增量 |
 | 智能切分 | 标题层级 → 段落 → 语义窗口，**父子块**（小块检索、大块喂 LLM） |
 | 混合检索 | 向量（语义）+ BM25（关键词）→ RRF 融合 → 可插拔重排（Jina / Cohere / 硅基流动 / 本地） |
 | RAG 问答 | 引用溯源、双保险拒答、查询改写反思、流式输出 |
 | 可插拔 Provider | Embedding / Rerank / LLM 全部可切换（API 或本地 Ollama，完全离线） |
+| 存储压缩 | 「压缩数据库」按钮可重建 Chroma 集合去掉重复全文，SQLite VACUUM 回收空间 |
 
 ---
 
@@ -73,24 +70,23 @@ uv run excel-co-pilot
 
 ### 🖥️ 使用指南
 
-**表格数据分析（切到「📊 表格数据分析」Tab）**
+**单次问答（切到「📊 单次问答」Tab）**
 
-1. **上传数据**：左侧选择 CSV / Excel / JSON / Parquet / PDF（可多选），点「加载到会话」
-2. **浏览数据**：下拉切换数据表，右侧查看预览
-3. **对话分析**：输入自然语言指令，例如
-   - 合并两表，按城市统计金额，画柱状图
-   - 新增一列"利润"，等于销售额减成本
-   - 把上一张图改成红色
-4. **导出报告**：一键下载 HTML + PDF
-5. **回滚**：撤销上一步 / 重置会话
+1. **发送文件**：左侧选择 CSV / Excel / PDF / Word / MD / TXT / PPT（可多选），点「发送给 AI」
+2. **简单问答**：在下方输入中文问题，例如"这些文件里，3 月份的总销售额是多少？"
+3. **清空**：清空上下文，重新发送文件
 
 **知识库问答（切到「📚 知识库问答」Tab）**
 
-1. 上传 PDF / Word / Markdown / TXT / PPT / Excel 文档（可多选），点「导入并建立索引」
-2. 提问，例如：文档里关于 XX 是怎么说的？回答会标注引用来源（《文件名》页码 + 相似度）
-3. 检索不到相关内容时会明确拒答，不会编造
+1. **新建 / 选择库**：左侧环境（知识库）下拉，可新建多库；导入文档前先切到目标库
+2. **导入文档**：上传 PDF / Word / Markdown / TXT / PPT / Excel（可多选），点「导入并建立索引」
+3. **提问**：例如"文档里关于 XX 是怎么说的？"回答会标注引用来源（《文件名》页码 + 相似度）
+4. **压缩数据库**：当 `storage/kb/chroma_db` 体积偏大时，点「🧹 压缩数据库」重建向量索引、回收空间
+5. 检索不到相关内容时会明确拒答，不会编造
 
 > [!note] 知识库需要 Embedding 能力：默认走硅基流动（`SILICONFLOW_API_KEY`），也可配 `OPENAI_API_KEY` 或本地模型（`KB_EMBEDDING_PROVIDER=local`，需装 sentence-transformers）。只有 LLM 没有 Embedding Key 时，导入会提示 embedding 失败。
+
+> [!note] 完全离线：设置 `KB_LLM_PROVIDER=ollama` + `KB_EMBEDDING_PROVIDER=local` 后，知识库的检索与问答全部在本机完成（需先启动 Ollama，`OLLAMA_MODEL` 默认 qwen2.5:7b）。本地嵌入用 bge-small 时，系统会自动用适配的低阈值（真实命中余弦约 0.45），不会被「置信度过低」误拒答。
 
 ---
 
@@ -103,8 +99,6 @@ uv run uvicorn excel_co_pilot.main:create_app --factory --port 8000
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | GET | `/health` | 健康检查（含 LLM 就绪状态） |
-| POST | `/upload?session_id=...` | 上传表格文件（multipart） |
-| POST | `/chat` | 表格对话，JSON `{"session_id": "...", "message": "..."}` |
 | GET | `/kb/health` | 知识库健康检查（含 LLM 与索引统计） |
 | POST | `/kb/upload` | 上传文档并建索引（multipart） |
 | POST | `/kb/ask` | 知识库问答，JSON `{"question": "...", "filters": {...}}` |
@@ -117,21 +111,20 @@ uv run uvicorn excel_co_pilot.main:create_app --factory --port 8000
 src/excel_co_pilot/
 ├── main.py            # 入口：FastAPI（create_app）+ Gradio（main）
 ├── config.py          # Pydantic 配置（读取 .env，含 KB 配置）
-├── core/              # 数据加载 / 探查 / 数据池 / 沙箱 / 可视化 / 会话
-├── agent/             # LangGraph 状态机（state / prompts / nodes / graph）
+├── core/              # 数据加载（DataLoader）+ 会话门面（Session）
 ├── kb/                # 知识库 RAG
 │   ├── loader.py      # 多格式文档解析（PDF/MD/TXT/DOCX/PPTX/XLSX）
 │   ├── splitter.py    # 父子块切分（标题层级 → 语义窗口）
 │   ├── db.py          # SQLite 单一事实源（SSOT）
 │   ├── indexer.py     # ChromaDB 向量索引（可重建）
-│   ├── ingest.py      # 摄入管道（MD5 去重 / 增量 / 断点续传）
+│   ├── ingest.py      # 摄入管道（MD5 去重 / 增量）
 │   ├── retriever.py   # 混合检索（向量 + BM25 → RRF → 重排）
 │   ├── qa_engine.py   # RAG 问答（改写反思 / 拒答 / 引用溯源 / 流式）
 │   ├── providers/     # 可插拔 Embedding / Rerank / LLM
 │   └── services.py    # 组件装配（进程级单例）
-├── services/          # LLM 网关 / PDF 导出
-├── ui/                # Gradio 界面（数据分析 Tab + 知识库 Tab）
-└── utils/             # 日志 / 异常 / 校验
+├── services/          # LLM 网关
+├── ui/                # Gradio 界面（单次问答 + 知识库 Tab）
+└── utils/             # 日志 / 异常 / 校验 / 重试
 ```
 
 ---
@@ -146,17 +139,6 @@ uv run python -m pytest
 
 ---
 
-### 🔒 安全说明
-
-- ==默认只在本地内存处理数据==，不主动上传云端（使用云端模型时自行评估）
-- AI 生成代码在受限沙箱执行：
-  - 仅注入 `pd` / `np` / `df*`，禁止 `import`、私有属性、危险内置函数
-  - 拦截 pandas / numpy 全部文件读写方法（`read_*` / `to_*` / `np.load` 等），杜绝文件外带
-  - 5 秒线程超时
-- 上传文件默认上限 200MB（`MAX_FILE_SIZE_MB` 可调）
-
----
-
 ### ⚙️ 配置项
 
 | 环境变量 | 默认值 | 说明 |
@@ -167,19 +149,18 @@ uv run python -m pytest
 | `LLM_TIMEOUT` | `60` | LLM 请求超时（秒） |
 | `GRADIO_PORT` | `7861` | 界面端口 |
 | `MAX_FILE_SIZE_MB` | `200` | 上传文件上限 |
-| `EXECUTOR_TIMEOUT` | `5` | 沙箱执行超时（秒） |
-| `MAX_REFLECT_RETRIES` | `3` | 出错自动反思重试次数 |
 | `KB_EMBEDDING_PROVIDER` | `siliconflow` | 知识库向量模型：`siliconflow` / `openai` / `local` |
+| `KB_LLM_PROVIDER` | `api` | 知识库问答 LLM：`api`（OpenAI 兼容）/ `ollama`（本地） |
 | `SILICONFLOW_API_KEY` | 空 | 硅基流动（BAAI/bge-m3 中文首选） |
 | `OPENAI_API_KEY` | 空 | OpenAI text-embedding-3-small |
 | `KB_RERANK_PROVIDER` | `none` | 重排：`none` / `jina` / `cohere` / `siliconflow` / `local` |
 | `JINA_API_KEY` / `COHERE_API_KEY` | 空 | 重排 API Key |
 | `OLLAMA_BASE_URL` / `OLLAMA_MODEL` | `http://localhost:11434` / `qwen2.5:7b` | 完全离线模式（LLM） |
 
-> [!note] 更多高级参数（切分 / 检索 / 拒答阈值 / 联网兜底等）见 `src/excel_co_pilot/config.py`。
+> [!note] 更多高级参数（切分 / 检索 / 拒答阈值等）见 `src/excel_co_pilot/config.py`。
 
 ---
 
 ### 🧰 技术栈
 
-Python 3.14 · LangGraph · Pandas · Plotly · Gradio · FastAPI · pdfplumber · reportlab · Loguru · Pydantic Settings · ChromaDB · rank-bm25 · jieba · PyMuPDF
+Python 3.14 · Pandas · Gradio · FastAPI · pdfplumber · Loguru · Pydantic Settings · ChromaDB · rank-bm25 · jieba · PyMuPDF

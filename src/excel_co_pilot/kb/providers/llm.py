@@ -1,7 +1,7 @@
 """LLM 实现：OpenAI 兼容 API（DeepSeek 等）与本地 Ollama。
 
 适配 excel_co_pilot 配置：复用 settings.deepseek_api_key / llm_base_url / llm_model，
-无需额外配置即可与表格分析 Agent 共享同一个 LLM。
+无需额外配置即可与表格分析共享同一个 LLM。
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ class OpenAICompatLLM:
     """OpenAI 兼容协议，复用 excel_co_pilot 的 DeepSeek 配置。"""
 
     name = "api"
-    supports_tools = True
 
     def __init__(self, **kwargs: Any) -> None:
         self.api_key = kwargs.get("api_key") or settings.deepseek_api_key
@@ -75,91 +74,10 @@ class OpenAICompatLLM:
             if delta:
                 yield delta
 
-    # ---------- Function Calling ----------
-    def chat(
-        self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        stream: bool = True,
-        **kwargs: Any,
-    ) -> Iterator[dict] | dict:
-        params = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": kwargs.get("temperature", self.temperature),
-            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
-        }
-        if tools:
-            params["tools"] = tools
-            params["tool_choice"] = "auto"
-        if stream:
-            return self._chat_stream(params)
-        return self._chat_complete(params)
-
-    @retry
-    def _chat_complete(self, params) -> dict:
-        resp = self.client.chat.completions.create(stream=False, **params)
-        msg = resp.choices[0].message
-        return {
-            "role": "assistant",
-            "content": msg.content or "",
-            "tool_calls": _normalize_tool_calls(msg.tool_calls),
-        }
-
-    @retry
-    def _chat_stream(self, params) -> Iterator[dict]:
-        resp = self.client.chat.completions.create(stream=True, **params)
-        acc: dict[int, dict] = {}
-        order: list[int] = []
-        for chunk in resp:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta.content:
-                yield {"type": "delta", "text": delta.content}
-            for tc in delta.tool_calls or []:
-                i = tc.index
-                if i not in acc:
-                    acc[i] = {
-                        "id": "",
-                        "type": "function",
-                        "function": {"name": "", "arguments": ""},
-                    }
-                    order.append(i)
-                if tc.id:
-                    acc[i]["id"] = tc.id
-                if tc.function:
-                    if tc.function.name:
-                        acc[i]["function"]["name"] += tc.function.name
-                    if tc.function.arguments:
-                        acc[i]["function"]["arguments"] += tc.function.arguments
-        if order:
-            yield {"type": "tool_calls", "tool_calls": [acc[i] for i in order]}
-
-
-def _normalize_tool_calls(tool_calls) -> list[dict] | None:
-    """把 OpenAI SDK 的 tool_calls 归一化为标准 dict。"""
-    if not tool_calls:
-        return None
-    out = []
-    for tc in tool_calls:
-        out.append(
-            {
-                "id": tc.id or "",
-                "type": "function",
-                "function": {
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments or "{}",
-                },
-            }
-        )
-    return out
-
 
 @register_llm("ollama")
 class OllamaLLM:
     name = "ollama"
-    supports_tools = True
 
     def __init__(self, **kwargs: Any) -> None:
         self.base_url = (kwargs.get("base_url") or settings.ollama_base_url).rstrip("/")
@@ -211,85 +129,3 @@ class OllamaLLM:
                 chunk = data.get("message", {}).get("content", "")
                 if chunk:
                     yield chunk
-
-    # ---------- Function Calling ----------
-    def chat(
-        self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        stream: bool = True,
-        **kwargs: Any,
-    ) -> Iterator[dict] | dict:
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": stream,
-            "options": {"temperature": kwargs.get("temperature", self.temperature)},
-        }
-        if tools:
-            payload["tools"] = tools
-        if stream:
-            return self._chat_stream(payload)
-        return self._chat_complete(payload)
-
-    @retry
-    def _chat_complete(self, payload) -> dict:
-        resp = requests.post(f"{self.base_url}/api/chat", json=payload, timeout=180)
-        resp.raise_for_status()
-        data = resp.json()
-        msg = data.get("message", {}) or {}
-        return {
-            "role": "assistant",
-            "content": msg.get("content", ""),
-            "tool_calls": _ollama_tool_calls(msg),
-        }
-
-    @retry
-    def _chat_stream(self, payload) -> Iterator[dict]:
-        tool_calls = None
-        with requests.post(
-            f"{self.base_url}/api/chat", json=payload, stream=True, timeout=300
-        ) as resp:
-            resp.raise_for_status()
-            for line in resp.iter_lines(decode_unicode=True):
-                if not line:
-                    continue
-                data = json.loads(line)
-                msg = data.get("message", {}) or {}
-                chunk = msg.get("content", "")
-                if chunk:
-                    yield {"type": "delta", "text": chunk}
-                calls = msg.get("tool_calls")
-                if calls:
-                    tool_calls = calls
-                if data.get("done"):
-                    break
-        if tool_calls:
-            yield {
-                "type": "tool_calls",
-                "tool_calls": _ollama_tool_calls({"tool_calls": tool_calls}),
-            }
-
-
-def _ollama_tool_calls(msg: dict) -> list[dict] | None:
-    """把 Ollama 的 tool_calls 归一化为 OpenAI 风格。"""
-    calls = msg.get("tool_calls")
-    if not calls:
-        return None
-    out = []
-    for tc in calls:
-        fn = tc.get("function", {}) or {}
-        args = fn.get("arguments", {}) or {}
-        out.append(
-            {
-                "id": tc.get("id", "") or "",
-                "type": "function",
-                "function": {
-                    "name": fn.get("name", ""),
-                    "arguments": json.dumps(args, ensure_ascii=False)
-                    if not isinstance(args, str)
-                    else args,
-                },
-            }
-        )
-    return out
