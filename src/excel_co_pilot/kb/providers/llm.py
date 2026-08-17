@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import json
-import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -15,26 +14,8 @@ import requests
 from openai import OpenAI
 
 from ...config import settings
+from ...utils.retry import retry
 from .base import register_llm
-
-_MAX_RETRIES = 3
-
-
-def _retry(fn):
-    """指数退避重试，替代 tenacity。"""
-
-    def wrapper(*args, **kwargs):
-        last = None
-        for attempt in range(_MAX_RETRIES):
-            try:
-                return fn(*args, **kwargs)
-            except Exception as e:
-                last = e
-                if attempt < _MAX_RETRIES - 1:
-                    time.sleep(1.5 * (attempt + 1))
-        raise last
-
-    return wrapper
 
 
 @register_llm("api")
@@ -69,7 +50,7 @@ class OpenAICompatLLM:
             return self._stream(messages, kwargs)
         return self._complete(messages, kwargs)
 
-    @_retry
+    @retry
     def _complete(self, messages, kwargs) -> str:
         resp = self.client.chat.completions.create(
             model=self.model,
@@ -80,7 +61,7 @@ class OpenAICompatLLM:
         )
         return resp.choices[0].message.content or ""
 
-    @_retry
+    @retry
     def _stream(self, messages, kwargs) -> Iterator[str]:
         resp = self.client.chat.completions.create(
             model=self.model,
@@ -115,7 +96,7 @@ class OpenAICompatLLM:
             return self._chat_stream(params)
         return self._chat_complete(params)
 
-    @_retry
+    @retry
     def _chat_complete(self, params) -> dict:
         resp = self.client.chat.completions.create(stream=False, **params)
         msg = resp.choices[0].message
@@ -125,7 +106,7 @@ class OpenAICompatLLM:
             "tool_calls": _normalize_tool_calls(msg.tool_calls),
         }
 
-    @_retry
+    @retry
     def _chat_stream(self, params) -> Iterator[dict]:
         resp = self.client.chat.completions.create(stream=True, **params)
         acc: dict[int, dict] = {}
@@ -208,14 +189,14 @@ class OllamaLLM:
             return self._stream(payload)
         return self._complete(payload)
 
-    @_retry
+    @retry
     def _complete(self, payload) -> str:
         resp = requests.post(f"{self.base_url}/api/chat", json=payload, timeout=180)
         resp.raise_for_status()
         data = resp.json()
         return data.get("message", {}).get("content", "")
 
-    @_retry
+    @retry
     def _stream(self, payload) -> Iterator[str]:
         with requests.post(
             f"{self.base_url}/api/chat", json=payload, stream=True, timeout=300
@@ -251,7 +232,7 @@ class OllamaLLM:
             return self._chat_stream(payload)
         return self._chat_complete(payload)
 
-    @_retry
+    @retry
     def _chat_complete(self, payload) -> dict:
         resp = requests.post(f"{self.base_url}/api/chat", json=payload, timeout=180)
         resp.raise_for_status()
@@ -263,7 +244,7 @@ class OllamaLLM:
             "tool_calls": _ollama_tool_calls(msg),
         }
 
-    @_retry
+    @retry
     def _chat_stream(self, payload) -> Iterator[dict]:
         tool_calls = None
         with requests.post(

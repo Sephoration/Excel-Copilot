@@ -1,6 +1,6 @@
 """应用入口：FastAPI REST API + Gradio 界面。
 
-- `main()`：启动 Gradio 界面（默认 http://localhost:7860）。
+- `main()`：启动 Gradio 界面（默认 http://localhost:7861）。
 - `create_app()`：返回 FastAPI 应用（健康检查 / 上传 / 对话 / 知识库），可独立用 uvicorn 启动。
 
 注意：本模块不使用 `from __future__ import annotations`——Python 3.14 + FastAPI 下字符串注解会让
@@ -8,16 +8,36 @@
 """
 
 import os
-import shutil
+from pathlib import Path
 
+from fastapi import UploadFile
 from loguru import logger
 
 from .config import settings
 from .core.session import SessionManager
-from .ui.gradio_app import build_ui
+from .ui.gradio_app import APP_CSS, APP_THEME, build_ui
+from .utils.exceptions import FileValidationError
 from .utils.logger import setup_logger
 
 _sessions = SessionManager()
+
+
+async def _stream_to_disk(file: UploadFile, dest: Path) -> None:
+    """流式写盘，边写边校验大小上限；超限立即中止并清理，避免大文件占满磁盘。"""
+    max_bytes = settings.max_file_size_mb * 1024 * 1024
+    written = 0
+    with dest.open("wb") as fh:
+        while True:
+            chunk = await file.read(1 << 20)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > max_bytes:
+                dest.unlink(missing_ok=True)
+                raise FileValidationError(
+                    f"文件超过上限 {settings.max_file_size_mb}MB，已中止上传"
+                )
+            fh.write(chunk)
 
 
 def create_app():
@@ -47,11 +67,13 @@ def create_app():
         upload_dir = settings.storage_dir / "uploads" / session_id
         upload_dir.mkdir(parents=True, exist_ok=True)
         dest = upload_dir / (file.filename or "upload.bin")
-        with dest.open("wb") as fh:
-            shutil.copyfileobj(file.file, fh)
         try:
+            await _stream_to_disk(file, dest)
             alias = session.load(dest)
+        except FileValidationError as exc:
+            return {"error": str(exc)}
         except Exception as exc:
+            dest.unlink(missing_ok=True)
             return {"error": str(exc)}
         return {"alias": alias, "file": file.filename}
 
@@ -73,15 +95,21 @@ def create_app():
         }
 
     @app.post("/kb/upload")
-    async def kb_upload(file: UploadFile = File(...)) -> dict:
+    async def kb_upload(
+        file: UploadFile = File(...), library: str = "default"
+    ) -> dict:
         from .kb.services import get_services
 
         svc = get_services()
+        if not svc.db.library_exists(library):
+            svc.db.create_library(library)
         svc.cfg.raw_dir.mkdir(parents=True, exist_ok=True)
         dest = svc.cfg.raw_dir / (file.filename or "upload.bin")
-        with dest.open("wb") as fh:
-            shutil.copyfileobj(file.file, fh)
-        result = svc.ingest.process_file(dest, source_name=file.filename)
+        try:
+            await _stream_to_disk(file, dest)
+        except FileValidationError as exc:
+            return {"error": str(exc)}
+        result = svc.ingest.process_file(dest, source_name=file.filename, library=library)
         return result
 
     class KbAskRequest(BaseModel):
@@ -114,10 +142,23 @@ def main() -> None:
     logger.info("启动 Excel Co-Pilot 界面")
     demo = build_ui()
     demo.queue()
+    # 禁用缓存：改版后浏览器必须拿到最新界面，避免旧布局残留
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    class NoCacheMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            response = await call_next(request)
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            return response
+
+    demo.app.add_middleware(NoCacheMiddleware)
     demo.launch(
         server_name="0.0.0.0",
         server_port=int(os.environ.get("GRADIO_PORT", "7861")),
         show_error=True,
+        css=APP_CSS,
+        theme=APP_THEME,
     )
 
 

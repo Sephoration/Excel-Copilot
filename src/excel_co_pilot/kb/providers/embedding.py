@@ -5,33 +5,14 @@
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
 import numpy as np
 from openai import OpenAI
 
 from ...config import settings
+from ...utils.retry import retry
 from .base import register_embedding
-
-_MAX_RETRIES = 3
-
-
-def _retry(fn):
-    """指数退避重试，替代 tenacity（避免额外依赖）。"""
-
-    def wrapper(*args, **kwargs):
-        last = None
-        for attempt in range(_MAX_RETRIES):
-            try:
-                return fn(*args, **kwargs)
-            except Exception as e:
-                last = e
-                if attempt < _MAX_RETRIES - 1:
-                    time.sleep(1.5 * (attempt + 1))
-        raise last
-
-    return wrapper
 
 
 class OpenAICompatibleEmbedding:
@@ -43,7 +24,7 @@ class OpenAICompatibleEmbedding:
         self.model = model
         self.dim = dim
 
-    @_retry
+    @retry
     def embed(self, texts: list[str], batch_size: int = 64) -> list[list[float]]:
         out: list[list[float]] = []
         for i in range(0, len(texts), batch_size):
@@ -101,20 +82,32 @@ class LocalEmbedding:
     name = "local"
     normalize = True
 
+    # 国内网络通常连不上 huggingface.co，默认走 hf-mirror.com 镜像；
+    # 用户已显式设置 HF_ENDPOINT 时尊重其选择。
+    HF_MIRROR = "https://hf-mirror.com"
+
     def __init__(self, **kwargs: Any) -> None:
         self.dim = kwargs.get("dim", 512)
         self._model = None
 
     def _ensure(self):
         if self._model is None:
+            import os
+
+            if "HF_ENDPOINT" not in os.environ:
+                os.environ["HF_ENDPOINT"] = self.HF_MIRROR
             try:
                 from sentence_transformers import SentenceTransformer
             except ImportError as e:  # pragma: no cover
                 raise RuntimeError(
-                    "本地嵌入需要安装 sentence-transformers（重依赖，默认未安装）"
+                    "本地嵌入需要安装 sentence-transformers（uv pip install sentence-transformers，"
+                    "或 uv sync --extra local）"
                 ) from e
             self._model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
-            self.dim = self._model.get_sentence_embedding_dimension()
+            get_dim = getattr(
+                self._model, "get_embedding_dimension", None
+            ) or self._model.get_sentence_embedding_dimension
+            self.dim = get_dim()
         return self._model
 
     def embed(self, texts: list[str], batch_size: int = 64) -> list[list[float]]:

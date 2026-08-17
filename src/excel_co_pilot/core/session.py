@@ -16,7 +16,7 @@ import pandas as pd
 
 from ..agent.graph import build_graph
 from ..agent.state import initial_state
-from ..config import save_env, settings
+from ..config import apply_llm_config, settings
 from ..services.llm_gateway import LLMGateway
 from .data_loader import DataLoader
 from .dataframe_pool import DataFramePool
@@ -33,6 +33,7 @@ class Session:
         self._llm_config: dict[str, str] = {}
         self._graph = None
         self.history: list[dict[str, str]] = []
+        self.context: list[dict[str, str]] = []  # 上下文记忆：[{name, text}]
 
     # -- LLM / 图 ---------------------------------------------------------
 
@@ -56,14 +57,14 @@ class Session:
             "model": model or settings.llm_model,
         }
         self._llm = LLMGateway(**self._llm_config)
-        if persist:
-            save_env(
-                {
-                    "DEEPSEEK_API_KEY": api_key,
-                    "LLM_BASE_URL": self._llm_config["base_url"],
-                    "LLM_MODEL": self._llm_config["model"],
-                }
-            )
+        # 立即同步到内存 settings（知识库 / REST API 读同一份配置），
+        # persist=True 时额外写入 .env，重启后仍生效。
+        apply_llm_config(
+            api_key=api_key,
+            base_url=self._llm_config["base_url"],
+            model=self._llm_config["model"],
+            persist=persist,
+        )
 
     def _get_llm(self) -> LLMGateway:
         if self._llm is None:
@@ -134,6 +135,56 @@ class Session:
             "plot_fig": final.get("plot_fig"),
         }
 
+    # -- 上下文记忆（简单问答） -------------------------------------------
+    # 架构：发送多少文件，就把多少文件解构成文本追加进上下文，
+    # 问答时把「上下文 + 问题」直接发给大模型，不做数据分析 Agent。
+
+    _MAX_FILE_CHARS = 30000  # 单文件进上下文的文本上限，超出截断
+
+    def attach_files(self, paths: list[str | Path]) -> list[dict]:
+        """把文件解构成文本，追加进上下文记忆。返回每文件 {name, chars} 摘要。"""
+        from ..kb.config import kb_config
+        from ..kb.loader import load_document
+
+        results: list[dict] = []
+        for raw in paths:
+            p = Path(raw)
+            ext = p.suffix.lower()
+            name = p.name
+            if ext in (".csv", ".xls", ".xlsx"):
+                # 表格文件 → CSV 文本，便于大模型按列理解
+                df = self._loader.load(p)
+                text = df.to_csv(index=False)
+            else:
+                blocks = load_document(p, kb_config)
+                text = "\n\n".join(b.text for b in blocks)
+            if len(text) > self._MAX_FILE_CHARS:
+                text = text[: self._MAX_FILE_CHARS] + "\n…（内容过长已截断）"
+            self.context.append({"name": name, "text": text})
+            results.append({"name": name, "chars": len(text)})
+        return results
+
+    def clear_context(self) -> None:
+        self.context.clear()
+
+    def simple_chat(self, question: str, history: list[dict] | None = None) -> str:
+        """简单问答：上下文 + 最近若干轮历史 + 问题，直接发给大模型。"""
+        if not self.llm_ready:
+            raise RuntimeError("未配置 LLM：请先在「模型配置」填写 DEEPSEEK_API_KEY")
+        context_text = "\n\n".join(
+            f"【文件：{c['name']}】\n{c['text']}" for c in self.context
+        )
+        system = (
+            "你是 Excel Co-Pilot，一个本地优先的 AI 数据助手。"
+            "以下是用户已发送到上下文的文件内容，回答时以这些内容为准：\n\n"
+            + (context_text or "（尚未添加任何文件）")
+        )
+        messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+        if history:
+            messages.extend(history[-8:])  # 只带最近几轮，防止上下文爆炸
+        messages.append({"role": "user", "content": question})
+        return self._get_llm().chat(messages)
+
     # -- 回滚 -------------------------------------------------------------
 
     def undo(self) -> bool:
@@ -142,6 +193,7 @@ class Session:
     def reset(self) -> None:
         self.pool.reset()
         self.history.clear()
+        self.context.clear()
 
 
 class SessionManager:

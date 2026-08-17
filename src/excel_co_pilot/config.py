@@ -89,12 +89,20 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
-def save_env(updates: dict[str, str], path: Path | None = None) -> None:
-    """把配置写入 .env，并同步更新内存中的 settings 单例。
+def _apply_to_settings(updates: dict[str, str]) -> None:
+    """把更新同步到内存中的 settings 单例（无需重启即对全进程生效）。
 
     settings 被各模块以 `from .config import settings` 引用（同一对象），
-    就地更新后无需重启即可让 LLM 网关与健康检查直接生效。
+    就地更新后 LLM 网关、知识库 providers 与健康检查都能立即感知。
     """
+    for env, field in _ENV_FIELDS.items():
+        if env in updates:
+            raw = updates[env]
+            setattr(settings, field, float(raw) if field == "llm_timeout" else raw)
+
+
+def save_env(updates: dict[str, str], path: Path | None = None) -> None:
+    """把配置写入 .env，并同步更新内存中的 settings 单例。"""
     target = path or PROJECT_ROOT / ".env"
     if not target.exists():
         target.write_text("# Excel Co-Pilot 配置（由界面写入）\n", encoding="utf-8")
@@ -116,7 +124,22 @@ def save_env(updates: dict[str, str], path: Path | None = None) -> None:
             out.append(f"{key}={value}")
     target.write_text("\n".join(out) + "\n", encoding="utf-8")
 
-    for env, field in _ENV_FIELDS.items():
-        if env in updates:
-            raw = updates[env]
-            setattr(settings, field, float(raw) if field == "llm_timeout" else raw)
+    _apply_to_settings(updates)
+
+
+def apply_llm_config(
+    api_key: str, base_url: str, model: str, persist: bool = False
+) -> None:
+    """让 LLM 配置立即生效（内存），persist=True 时额外写入 .env。
+
+    表格分析 Session 与知识库 / REST API 读的都是同一份 settings：
+    即使不勾选「保存到 .env」，内存同步后 KB 问答与 /kb/ask 也能直接用上新 key。
+    """
+    updates = {
+        "DEEPSEEK_API_KEY": (api_key or "").strip(),
+        "LLM_BASE_URL": (base_url or "").strip(),
+        "LLM_MODEL": (model or "").strip(),
+    }
+    _apply_to_settings(updates)
+    if persist:
+        save_env({k: v for k, v in updates.items() if v})

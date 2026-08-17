@@ -24,6 +24,8 @@ ST_EMBEDDING_FAILED = "embedding_failed"
 
 SCHEMA_VERSION = 2
 
+DEFAULT_LIBRARY = "default"
+
 
 @dataclass
 class Chunk:
@@ -49,6 +51,7 @@ class FileRecord:
     status: str = ST_PENDING
     error_msg: str | None = None
     created_at: float = 0.0
+    library: str = DEFAULT_LIBRARY
 
 
 class Database:
@@ -76,7 +79,8 @@ class Database:
                     mtime REAL NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
                     error_msg TEXT,
-                    created_at REAL NOT NULL
+                    created_at REAL NOT NULL,
+                    library TEXT NOT NULL DEFAULT 'default'
                 );
                 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
                 CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash);
@@ -97,6 +101,12 @@ class Database:
                 CREATE TABLE IF NOT EXISTS kb_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS libraries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    created_at REAL NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -120,19 +130,77 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
                 """
             )
-            # 轻量迁移：老库补 source_name / meta_json 列（不改 SCHEMA_VERSION）
+            # 轻量迁移：老库补 source_name / meta_json / library 列（不改 SCHEMA_VERSION）
             cols = [
                 r["name"]
                 for r in self._conn.execute("PRAGMA table_info(files)").fetchall()
             ]
             if "source_name" not in cols:
                 self._conn.execute("ALTER TABLE files ADD COLUMN source_name TEXT")
+            if "library" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE files ADD COLUMN library TEXT NOT NULL DEFAULT 'default'"
+                )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_library ON files(library)"
+            )
             mcols = [
                 r["name"]
                 for r in self._conn.execute("PRAGMA table_info(messages)").fetchall()
             ]
             if "meta_json" not in mcols:
                 self._conn.execute("ALTER TABLE messages ADD COLUMN meta_json TEXT")
+            # 确保默认库存在
+            self._conn.execute(
+                "INSERT OR IGNORE INTO libraries (name, created_at) VALUES (?, ?)",
+                (DEFAULT_LIBRARY, time.time()),
+            )
+
+    # ---------- 库 ----------
+    def create_library(self, name: str) -> int:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("库名不能为空")
+        if name == DEFAULT_LIBRARY or any(c in name for c in '/\\:*?"<>|'):
+            raise ValueError("库名不合法（不能包含 / \\ : * ? \" < > |）")
+        with self._lock, self._conn:
+            try:
+                cur = self._conn.execute(
+                    "INSERT INTO libraries (name, created_at) VALUES (?, ?)",
+                    (name, time.time()),
+                )
+            except sqlite3.IntegrityError as e:
+                raise ValueError(f"库「{name}」已存在") from e
+            return int(cur.lastrowid)
+
+    def list_libraries(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT l.name, COUNT(f.id) file_count FROM libraries l "
+                "LEFT JOIN files f ON f.library = l.name GROUP BY l.id ORDER BY l.id"
+            ).fetchall()
+            return [{"name": r["name"], "file_count": r["file_count"]} for r in rows]
+
+    def library_exists(self, name: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM libraries WHERE name=?", (name,)
+            ).fetchone()
+            return row is not None
+
+    def library_file_ids(self, name: str) -> list[int]:
+        """返回某库下全部文件 id（含非 indexed，供向量清理/过滤用）。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id FROM files WHERE library=?", (name,)
+            ).fetchall()
+            return [int(r["id"]) for r in rows]
+
+    def delete_library(self, name: str) -> None:
+        """删除库记录与库下文件元数据（chunks 级联删除；向量由调用方清理）。"""
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM libraries WHERE name=?", (name,))
+            self._conn.execute("DELETE FROM files WHERE library=?", (name,))
 
     # ---------- 文件 ----------
     def upsert_file(
@@ -142,13 +210,15 @@ class Database:
         mtime: float,
         ext: str,
         source_name: str | None = None,
+        library: str = DEFAULT_LIBRARY,
     ) -> tuple[FileRecord, bool]:
         """返回 (记录, 是否新文件)。若同路径已存在且 hash 相同则视为已入库。"""
         now = time.time()
         name = Path(path).name
         with self._lock, self._conn:
             row = self._conn.execute(
-                "SELECT * FROM files WHERE path=?", (path,)
+                "SELECT * FROM files WHERE path=? AND library=?",
+                (path, library),
             ).fetchone()
             if (
                 row
@@ -168,9 +238,19 @@ class Database:
                 ).fetchone()
                 return self._to_file(updated), False
             cur = self._conn.execute(
-                "INSERT INTO files (path,name,source_name,ext,content_hash,mtime,status,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (path, name, source_name, ext, content_hash, mtime, ST_PENDING, now),
+                "INSERT INTO files (path,name,source_name,ext,content_hash,mtime,status,created_at,library) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    path,
+                    name,
+                    source_name,
+                    ext,
+                    content_hash,
+                    mtime,
+                    ST_PENDING,
+                    now,
+                    library,
+                ),
             )
             new_id = cur.lastrowid
         return self.get_file(new_id), True
@@ -192,19 +272,27 @@ class Database:
             return self._to_file(row) if row else None
 
     def list_files(
-        self, status: str | None = None, limit: int = 1000, offset: int = 0
+        self,
+        status: str | None = None,
+        limit: int = 1000,
+        offset: int = 0,
+        library: str | None = None,
     ) -> list[FileRecord]:
         with self._lock:
+            where = []
+            params: list[Any] = []
             if status:
-                rows = self._conn.execute(
-                    "SELECT * FROM files WHERE status=? ORDER BY id DESC LIMIT ? OFFSET ?",
-                    (status, limit, offset),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM files ORDER BY id DESC LIMIT ? OFFSET ?",
-                    (limit, offset),
-                ).fetchall()
+                where.append("status=?")
+                params.append(status)
+            if library:
+                where.append("library=?")
+                params.append(library)
+            clause = f"WHERE {' AND '.join(where)}" if where else ""
+            params.extend([limit, offset])
+            rows = self._conn.execute(
+                f"SELECT * FROM files {clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+                params,
+            ).fetchall()
             return [self._to_file(r) for r in rows]
 
     def find_indexed_by_hash(
@@ -476,6 +564,7 @@ class Database:
             status=row["status"],
             error_msg=row["error_msg"],
             created_at=row["created_at"],
+            library=row["library"] if "library" in keys else DEFAULT_LIBRARY,
         )
 
     @staticmethod

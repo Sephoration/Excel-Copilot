@@ -161,10 +161,12 @@ class Retriever:
         self.sparse = SparseIndex(database)
 
     def _metadata_where(self, filters: dict | None) -> dict | None:
-        """把高层过滤器转成 ChromaDB where。支持 file_name / file_names / doc_ids。"""
+        """把高层过滤器转成 ChromaDB where。支持 library / file_name / file_names / doc_ids。"""
         if not filters:
             return None
         clauses = []
+        if filters.get("library"):
+            clauses.append({"library": {"$eq": filters["library"]}})
         if filters.get("file_name"):
             clauses.append({"file_name": {"$eq": filters["file_name"]}})
         if filters.get("file_names"):
@@ -178,10 +180,20 @@ class Retriever:
         return {"$and": clauses}
 
     def _resolve_allowed_doc_ids(self, filters: dict | None) -> set[int] | None:
-        """把 filters 的 doc_ids / file_names 解析为稀疏端允许的 doc_id 集合。None 表示不过滤。
+        """把 filters 的 library / doc_ids / file_names 解析为稀疏端允许的 doc_id 集合。None 表示不过滤。
 
         文件名匹配顺序：源名 → 文件名（含扩展名）→ 文件名去扩展名 → 含扩展名文件名子串。
         """
+        if not filters:
+            return None
+        if filters.get("library"):
+            ids = set(self.db.library_file_ids(filters["library"]))
+            # 库内再叠加 doc_ids / file_names 过滤
+            extra = self._resolve_name_ids(filters)
+            return ids if extra is None else ids & extra
+        return self._resolve_name_ids(filters)
+
+    def _resolve_name_ids(self, filters: dict | None) -> set[int] | None:
         if not filters:
             return None
         if filters.get("doc_ids"):

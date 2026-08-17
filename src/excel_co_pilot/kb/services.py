@@ -121,8 +121,12 @@ class Services:
 
     @property
     def llm_ready(self) -> bool:
-        """是否具备问答能力：至少配置了 LLM API Key。"""
-        return bool(settings.deepseek_api_key) or bool(settings.ollama_base_url)
+        """是否具备问答能力：KB 的 LLM 固定走 OpenAI 兼容 API，需要 API Key。
+
+        注意：KB 的 llm provider 在 KbConfig 中硬编码为 "api"（OpenAI 兼容），
+        没有选择 Ollama 的入口，因此 ollama_base_url 有默认值也不能算就绪。
+        """
+        return bool(settings.deepseek_api_key)
 
     def close(self) -> None:
         if self._db is not None:

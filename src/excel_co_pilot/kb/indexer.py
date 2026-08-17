@@ -33,6 +33,7 @@ class Indexer:
         file_name: str,
         chunks: list[Chunk],
         embeddings: list[list[float]],
+        library: str = "default",
     ) -> None:
         if not chunks:
             return
@@ -44,6 +45,7 @@ class Indexer:
                 "file_name": file_name,
                 "chunk_index": c.index,
                 "page": c.page,
+                "library": library,
             }
             for c in chunks
         ]
@@ -54,6 +56,12 @@ class Indexer:
 
     def delete_doc(self, doc_id: int) -> None:
         self._collection.delete(where={"doc_id": doc_id})
+
+    def delete_docs(self, doc_ids: list[int]) -> None:
+        """批量删除向量（删除整个知识库时用）。"""
+        if not doc_ids:
+            return
+        self._collection.delete(where={"doc_id": {"$in": doc_ids}})
 
     def delete_chunk(self, chunk_id: int) -> None:
         """按 chunk_id 删除向量（chunk_id 在 DB 内全局唯一）。"""

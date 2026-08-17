@@ -116,6 +116,15 @@ FILE_IO_METHODS = {
     "to_xml",
     "to_gbq",
     "to_clipboard",
+    # pandas 内部通道：绕过 read_*/to_* 拦截后仍能直接拿文件句柄或内容
+    # （如 pd.io.common.open('C:/secret').read()、get_filepath_or_buffer(...).read()）
+    "open",
+    "get_filepath_or_buffer",
+    "get_handle",
+    "file_exists",
+    "json_reader",
+    "clipboard_get",
+    "clipboard_set",
     # numpy 文件 I/O
     "load",
     "save",
@@ -127,6 +136,13 @@ FILE_IO_METHODS = {
     "fromfile",
     "tofile",
     "memmap",
+    # numpy 内部通道：np.lib.format / np.lib.npyio 直读直写
+    "read_array",
+    "write_array",
+    "open_memmap",
+    "recfromcsv",
+    "recfromtxt",
+    "dump",
 }
 
 

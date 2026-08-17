@@ -5,32 +5,13 @@
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
 import requests
 
 from ...config import settings
+from ...utils.retry import retry
 from .base import register_reranker
-
-_MAX_RETRIES = 3
-
-
-def _retry(fn):
-    """指数退避重试，替代 tenacity。"""
-
-    def wrapper(*args, **kwargs):
-        last = None
-        for attempt in range(_MAX_RETRIES):
-            try:
-                return fn(*args, **kwargs)
-            except Exception as e:
-                last = e
-                if attempt < _MAX_RETRIES - 1:
-                    time.sleep(1.5 * (attempt + 1))
-        raise last
-
-    return wrapper
 
 
 @register_reranker("jina")
@@ -44,7 +25,7 @@ class JinaReranker:
         if not self.api_key:
             raise RuntimeError("JINA_API_KEY 未设置")
 
-    @_retry
+    @retry
     def rerank(
         self, query: str, candidates: list[tuple[str, float]], top_k: int = 5
     ) -> list[tuple[int, float]]:
@@ -77,7 +58,7 @@ class CohereReranker:
         if not self.api_key:
             raise RuntimeError("COHERE_API_KEY 未设置")
 
-    @_retry
+    @retry
     def rerank(
         self, query: str, candidates: list[tuple[str, float]], top_k: int = 5
     ) -> list[tuple[int, float]]:
@@ -117,7 +98,7 @@ class SiliconFlowReranker:
         if not self.api_key:
             raise RuntimeError("SILICONFLOW_API_KEY 未设置")
 
-    @_retry
+    @retry
     def rerank(
         self, query: str, candidates: list[tuple[str, float]], top_k: int = 5
     ) -> list[tuple[int, float]]:
