@@ -241,13 +241,17 @@ class IngestEngine:
                     try:
                         yield completed, len(paths), f.result()
                     except Exception as e:  # 理论不会发生
-                        yield completed, len(paths), {
-                            "path": str(futures[f][0]),
-                            "source_name": futures[f][1],
-                            "library": library,
-                            "status": ST_FAILED,
-                            "error": str(e),
-                        }
+                        yield (
+                            completed,
+                            len(paths),
+                            {
+                                "path": str(futures[f][0]),
+                                "source_name": futures[f][1],
+                                "library": library,
+                                "status": ST_FAILED,
+                                "error": str(e),
+                            },
+                        )
         else:
             for i, (p, sn) in enumerate(zip(paths, names), start=1):
                 yield i, len(paths), self.process_file(p, sn, library)

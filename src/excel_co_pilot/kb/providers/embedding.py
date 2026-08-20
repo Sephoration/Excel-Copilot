@@ -100,8 +100,12 @@ class LocalEmbedding:
     def is_cached(cls) -> bool:
         """模型是否已下载到 HF 缓存（判断能否安全地后台预载，避免联网挂死）。"""
         name = cls.MODEL.replace("/", "--")
-        root = Path(os.path.expanduser("~")) / ".cache" / "huggingface" / "hub" / (
-            f"models--{name}"
+        root = (
+            Path(os.path.expanduser("~"))
+            / ".cache"
+            / "huggingface"
+            / "hub"
+            / (f"models--{name}")
         )
         return (root / "snapshots").is_dir()
 
@@ -123,9 +127,10 @@ class LocalEmbedding:
                     "或 uv sync --extra local）"
                 ) from e
             self._model = SentenceTransformer(self.MODEL)
-            get_dim = getattr(
-                self._model, "get_embedding_dimension", None
-            ) or self._model.get_sentence_embedding_dimension
+            get_dim = (
+                getattr(self._model, "get_embedding_dimension", None)
+                or self._model.get_sentence_embedding_dimension
+            )
             self.dim = get_dim()
         return self._model
 

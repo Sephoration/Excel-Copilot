@@ -137,7 +137,7 @@ class Database:
         if not name:
             raise ValueError("库名不能为空")
         if name == DEFAULT_LIBRARY or any(c in name for c in '/\\:*?"<>|'):
-            raise ValueError("库名不合法（不能包含 / \\ : * ? \" < > |）")
+            raise ValueError('库名不合法（不能包含 / \\ : * ? " < > |）')
         with self._lock, self._conn:
             try:
                 cur = self._conn.execute(

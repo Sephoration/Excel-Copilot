@@ -32,7 +32,7 @@ def _read_text(path: Path) -> str:
     for enc in ("utf-8", "gbk"):
         try:
             return data.decode(enc)
-        except UnicodeDecodeError, LookupError:
+        except (UnicodeDecodeError, LookupError):
             continue
     return data.decode("utf-8", errors="replace")
 
@@ -253,9 +253,9 @@ def load_csv(path: Path, cfg) -> list[ContentBlock]:
     """CSV → 表格文本块（每 60 行一块，每块带表头，便于检索后理解列含义）。"""
     import pandas as pd
 
-    from ..core.data_loader import _detect_encoding
+    from ..utils.encoding import detect_encoding
 
-    df = pd.read_csv(path, encoding=_detect_encoding(path))
+    df = pd.read_csv(path, encoding=detect_encoding(path))
     header = " | ".join(str(c) for c in df.columns)
     blocks: list[ContentBlock] = []
     rows: list[str] = []

@@ -1,7 +1,7 @@
 [project]
 name = "excel-co-pilot"
 version = "0.1.0"
-description = "Excel Co-Pilot：本地优先的 AI 数据分析智能体（LangGraph + Gradio）"
+description = "Excel Co-Pilot：本地优先的 AI 数据分析工作台（LangGraph 表格分析 + Gradio 界面 + RAG 知识库）"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -9,6 +9,9 @@ dependencies = [
     "fastapi>=0.141.1",
     "gradio>=6.24.0",
     "jieba>=0.42",
+    "langchain>=1.3.15",
+    "langchain-openai>=1.5.1",
+    "langgraph>=1.2.11",
     "loguru>=0.7.3",
     "numpy>=2.5.2",
     "openai>=2.54.0",

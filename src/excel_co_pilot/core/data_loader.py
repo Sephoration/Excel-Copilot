@@ -5,20 +5,11 @@ from typing import ClassVar
 
 import pandas as pd
 
+from ..utils.encoding import detect_encoding
+
 
 class LoadError(Exception):
     pass
-
-
-def _detect_encoding(path: Path) -> str:
-    raw = path.read_bytes()[:65536]
-    for enc in ("utf-8-sig", "utf-8", "gbk", "iso-8859-1"):
-        try:
-            raw.decode(enc)
-            return enc
-        except UnicodeDecodeError:
-            continue
-    return "utf-8"
 
 
 class DataLoader:
@@ -64,7 +55,7 @@ class DataLoader:
 
     @staticmethod
     def _load_csv(path: Path) -> pd.DataFrame:
-        encoding = _detect_encoding(path)
+        encoding = detect_encoding(path)
         df = pd.read_csv(path, encoding=encoding)
         if df.shape[1] == 1:
             df = pd.read_csv(path, encoding=encoding, sep=";", on_bad_lines="skip")

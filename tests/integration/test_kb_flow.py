@@ -200,9 +200,7 @@ def test_compact_rebuilds_and_removes_documents(services: Services):
         documents=[f"doc {i}" for i in range(n)],
     )
     before = services.indexer.count()  # 原记录 + legacy 记录
-    docs_before = services.indexer._collection.get(include=["documents"])[
-        "documents"
-    ]
+    docs_before = services.indexer._collection.get(include=["documents"])["documents"]
     assert any(d is not None for d in docs_before)  # 前置：确实存在 documents
 
     result = services.indexer.compact()
@@ -210,9 +208,7 @@ def test_compact_rebuilds_and_removes_documents(services: Services):
     assert result["removed"] == before
 
     assert services.indexer.count() == before  # count 不变
-    docs_after = services.indexer._collection.get(include=["documents"])[
-        "documents"
-    ]
+    docs_after = services.indexer._collection.get(include=["documents"])["documents"]
     assert not any(d is not None for d in docs_after)  # 重建后 documents 已清除
 
     # 再次 compact 应为幂等空操作

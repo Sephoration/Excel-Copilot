@@ -119,16 +119,12 @@ def build_kb_tab() -> None:
                 )
                 new_ok = gr.Button("创建", size="sm", scale=1)
             # 当前环境简介（仅文件数量）
-            brief_md = gr.Markdown(
-                _brief_markdown(env_radio.value or "default")
-            )
+            brief_md = gr.Markdown(_brief_markdown(env_radio.value or "default"))
             # 数据库详情（默认隐藏，点「数据库设置」展开）
             detail_visible = gr.State(False)
             with gr.Column(visible=False, elem_classes="kb-detail") as detail_col:
                 gr.Markdown("### 📄 数据库详情", elem_classes="kb-side-head")
-                stats_md = gr.Markdown(
-                    _stats_markdown(env_radio.value or "default")
-                )
+                stats_md = gr.Markdown(_stats_markdown(env_radio.value or "default"))
                 detail_table = gr.Markdown(
                     _files_markdown(env_radio.value or "default")
                 )
@@ -149,7 +145,9 @@ def build_kb_tab() -> None:
                     type="filepath",
                 )
                 with gr.Row():
-                    ingest_btn = gr.Button("🚀 导入并建立索引", variant="primary", size="sm")
+                    ingest_btn = gr.Button(
+                        "🚀 导入并建立索引", variant="primary", size="sm"
+                    )
                     compact_btn = gr.Button("🧹 压缩", size="sm")
                     refresh_btn = gr.Button("🔄 刷新", size="sm")
                 ingest_status = gr.Markdown("")
@@ -161,14 +159,14 @@ def build_kb_tab() -> None:
             with gr.Column(elem_classes="kb-chat-box"):
                 chatbot = gr.Chatbot(height=460, label="对话（支持追问）")
                 ai_progress = gr.HTML(progress_html("", None))
-                with gr.Row():
+                with gr.Row(elem_classes="chat-input-sticky"):
                     kb_msg = gr.Textbox(
                         placeholder="例如：文档里关于 XX 是怎么说的？",
-                        scale=4,
+                        scale=5,
                         show_label=False,
                     )
-                    kb_send = gr.Button("提问", variant="primary", scale=1)
-                    kb_clear = gr.Button("🗑 清空", scale=1)
+                    kb_send = gr.Button("发送", variant="primary", scale=1)
+                    kb_clear = gr.Button("清空", size="sm", scale=0)
                 kb_answer = gr.Markdown(
                     "（回答会显示在这里，并附引用来源）", elem_classes="kb-answer"
                 )
@@ -181,11 +179,27 @@ def build_kb_tab() -> None:
 
     def on_create(name: str, current: str):
         if not name or not name.strip():
-            return "（请输入环境名）", gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+            return (
+                "（请输入环境名）",
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+            )
         try:
             get_services().db.create_library(name.strip())
         except ValueError as exc:
-            return f"❌ {exc}", gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+            return (
+                f"❌ {exc}",
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+            )
         libs = _lib_choices()
         new_val = name.strip()
         return (
@@ -200,7 +214,13 @@ def build_kb_tab() -> None:
 
     def on_delete(library: str):
         if not library or library == "default":
-            return "❌ 默认环境不可删除", gr.update(), gr.update(), gr.update(), gr.update()
+            return (
+                "❌ 默认环境不可删除",
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                gr.update(),
+            )
         count = get_services().ingest.delete_library(library)
         get_services().refresh_indexes()  # 删除后同步刷新检索索引
         libs = _lib_choices()
@@ -323,21 +343,35 @@ def build_kb_tab() -> None:
         - 动画进度条表示"正在工作中"，避免误以为卡死。
         """
         if not question or not question.strip():
-            yield gr.update(), _to_messages(history or []), progress_html("", None), "", history or []
+            yield (
+                gr.update(),
+                _to_messages(history or []),
+                progress_html("", None),
+                "",
+                history or [],
+            )
             return
         history = history or []
-        yield gr.update(), _to_messages(history), progress_html("⏳ 正在检索知识库… 10%", 10, animate=True), "", history
+        yield (
+            gr.update(),
+            _to_messages(history),
+            progress_html("⏳ 正在检索知识库… 10%", 10, animate=True),
+            "",
+            history,
+        )
         svc = get_services()
         if not svc.llm_ready:
-            yield gr.update(), _to_messages(history), progress_html("", None), (
-                "⚠️ 未配置 LLM：请先在上方「模型配置」填写 DEEPSEEK_API_KEY。"
-            ), history
+            yield (
+                gr.update(),
+                _to_messages(history),
+                progress_html("", None),
+                ("⚠️ 未配置 LLM：请先在上方「模型配置」填写 DEEPSEEK_API_KEY。"),
+                history,
+            )
             return
         # 只传最近 N 轮给 LLM 作上下文，避免历史无限膨胀
         turns = settings.kb_history_turns
-        llm_history = [
-            {"role": r, "content": c} for r, c in history[-turns * 2 :]
-        ]
+        llm_history = [{"role": r, "content": c} for r, c in history[-turns * 2 :]]
 
         _END = object()
         q: queue.Queue = queue.Queue()
@@ -367,16 +401,26 @@ def build_kb_tab() -> None:
             except queue.Empty:
                 el = int(time.time() - t0)
                 pct = min(45, 10 + el)  # 10% 起，随耗时推进到 45%
-                yield gr.update(), _to_messages(history), progress_html(
-                    f"⏳ 正在检索知识库… {pct}%（已用 {el}s）", pct, animate=True
-                ), "", history
+                yield (
+                    gr.update(),
+                    _to_messages(history),
+                    progress_html(
+                        f"⏳ 正在检索知识库… {pct}%（已用 {el}s）", pct, animate=True
+                    ),
+                    "",
+                    history,
+                )
                 continue
             if first is _END:
                 break
             if isinstance(first, Exception):
-                yield gr.update(), _to_messages(history), progress_html("", None), (
-                    f"❌ 出错了：{first}"
-                ), history
+                yield (
+                    gr.update(),
+                    _to_messages(history),
+                    progress_html("", None),
+                    (f"❌ 出错了：{first}"),
+                    history,
+                )
                 return
             if isinstance(first, str):
                 partial = first
@@ -404,11 +448,17 @@ def build_kb_tab() -> None:
             except queue.Empty:
                 el = int(time.time() - t0)
                 pct = min(95, 50 + el)  # 50% 起，随耗时推进
-                yield gr.update(), _to_messages(history + [(question.strip(), partial)]), progress_html(
-                    f"⏳ AI 正在生成回答… {pct}%（已用 {el}s，{len(partial)} 字）",
-                    pct,
-                    animate=True,
-                ), "", history
+                yield (
+                    gr.update(),
+                    _to_messages(history + [(question.strip(), partial)]),
+                    progress_html(
+                        f"⏳ AI 正在生成回答… {pct}%（已用 {el}s，{len(partial)} 字）",
+                        pct,
+                        animate=True,
+                    ),
+                    "",
+                    history,
+                )
                 continue
             if item is _END:
                 break
@@ -419,9 +469,15 @@ def build_kb_tab() -> None:
                 partial += item
             else:
                 result = item
-            yield gr.update(), _to_messages(history + [(question.strip(), partial)]), progress_html(
-                f"⏳ AI 正在生成回答… 55%（{len(partial)} 字）", 55, animate=True
-            ), "", history
+            yield (
+                gr.update(),
+                _to_messages(history + [(question.strip(), partial)]),
+                progress_html(
+                    f"⏳ AI 正在生成回答… 55%（{len(partial)} 字）", 55, animate=True
+                ),
+                "",
+                history,
+            )
 
         if result is None:
             answer = partial or "（生成中断）"
@@ -454,7 +510,15 @@ def build_kb_tab() -> None:
     new_ok.click(
         on_create,
         [new_name, env_radio],
-        [ingest_status, env_radio, create_row, new_name, brief_md, detail_table, stats_md],
+        [
+            ingest_status,
+            env_radio,
+            create_row,
+            new_name,
+            brief_md,
+            detail_table,
+            stats_md,
+        ],
     )
     settings_btn.click(
         lambda v: (gr.update(visible=not v), not v),
@@ -468,10 +532,14 @@ def build_kb_tab() -> None:
     )
     # 导入是分钟级长任务：逐文件产出进度（generator），不靠 Gradio 角标
     ingest_btn.click(
-        on_ingest, [upload, env_radio], [ingest_status, detail_table],
+        on_ingest,
+        [upload, env_radio],
+        [ingest_status, detail_table],
         show_progress="hidden",
     )
-    refresh_btn.click(on_refresh, [env_radio], [brief_md, detail_table, stats_md, env_radio])
+    refresh_btn.click(
+        on_refresh, [env_radio], [brief_md, detail_table, stats_md, env_radio]
+    )
     compact_btn.click(
         on_compact,
         [env_radio],

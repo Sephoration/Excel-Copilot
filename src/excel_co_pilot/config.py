@@ -29,6 +29,13 @@ class Settings(BaseSettings):
 
     storage_dir: Path = PROJECT_ROOT / "storage"
 
+    # ---- 表格分析（结构化问数 / 多表联表）配置 ----
+    excel_preview_rows: int = 5
+    excel_default_result_limit: int = 20
+    excel_max_result_limit: int = 1000
+    # 工具调用循环最大轮数
+    agent_max_iterations: int = 8
+
     # ---- 知识库（KB / RAG）配置 ----
     # KB 问答 LLM：api = OpenAI 兼容（DeepSeek 等，需 API Key）；ollama = 完全本地
     kb_llm_provider: str = "api"

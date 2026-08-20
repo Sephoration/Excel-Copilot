@@ -1,35 +1,34 @@
 ### 📊 Excel Co-Pilot
 
-本地优先、AI 驱动的**数据与知识问答工作站**：一边把 Excel / CSV / PDF / Word 等文件直接发进上下文、用中文提问（简单问答），一边把文档变成可检索的知识库，基于 RAG 用中文提问并带回溯引用。
+构建了一套**本地优先**的 AI 数据工作站：用中文自然语言操作内存表格进行分析，同时将文档资料转化为可检索的知识库，**数据全程不出域**，解决传统 BI 门槛高与敏感数据外泄的痛点。
 
 [![Python](https://img.shields.io/badge/Python-3.14-blue.svg)](https://www.python.org/)
 [![uv](https://img.shields.io/badge/uv-package%20manager-8B89CC.svg)](https://docs.astral.sh/uv/)
-[![Tests](https://img.shields.io/badge/tests-19%20passed-brightgreen.svg)](#-测试)
+[![Tests](https://img.shields.io/badge/tests-44%20passed-brightgreen.svg)](#-测试)
 
 > [!note] ==数据不出域==：所有处理都在本地内存完成，不主动上传云端（调用云端模型时自行评估）。
 
 ---
 
-### ✨ 特性
+### ✨ 核心能力（四大支柱）
 
-**📊 单次问答（Tab 1）**
+**1. LangGraph 架构**
 
-| 能力 | 说明 |
-| :--- | :--- |
-| 多格式接入 | CSV / Excel / JSON / Parquet / PDF 表格（自动识别编码，GBK 不乱码） |
-| 文件进上下文 | 发送多少文件，就把多少文件解构成文本追加进上下文，边问边答 |
-| 上下文问答 | 结合文件内容直接问答，带最近若干轮历史（防上下文爆炸） |
+> 构建工作流——节点化编排、条件路由、工具调用，执行过程可追踪可回溯。工具按需调用，结果自动回流参与下一轮推理；默认 8 轮上限、recursion_limit 24 步硬限制防死循环。
 
-**📚 知识库问答（Tab 2，RAG）**
+**2. RAG 混合检索**
 
-| 能力 | 说明 |
-| :--- | :--- |
-| 多格式摄入 | PDF / Word / Markdown / TXT / PPT / Excel，MD5 去重 + 增量 |
-| 智能切分 | 标题层级 → 段落 → 语义窗口，**父子块**（小块检索、大块喂 LLM） |
-| 混合检索 | 向量（语义）+ BM25（关键词）→ RRF 融合 → 可插拔重排（Jina / Cohere / 硅基流动 / 本地） |
-| RAG 问答 | 引用溯源、双保险拒答、查询改写反思、流式输出 |
-| 可插拔 Provider | Embedding / Rerank / LLM 全部可切换（API 或本地 Ollama，完全离线） |
-| 存储压缩 | 「压缩数据库」按钮可重建 Chroma 集合去掉重复全文，SQLite VACUUM 回收空间 |
+> 向量 + BM25 双路召回，经 RRF 融合后接入可插拔重排（Jina / Cohere / 硅基流动 / 本地）。父子块切分——小块检索、大块喂 LLM；召回 20 路、融合取 Top-15、精排 5 条，层层收窄。
+
+**3. 问答管线**
+
+> 检索 → 查询改写反思 → 拒答判定 → 流式生成四阶段闭环，回答带页码引用溯源。置信度过低或候选差距过小双保险拒答——宁可不说也不臆造；全链路本地沙盒执行、数据不出域。
+
+**4. 文档摄入管道**
+
+> 注册表驱动解析 7 种格式（PDF / Word / PPT / Markdown / TXT / Excel / CSV），扫描件可选 OCR。MD5 去重 + 增量摄入 + 断点续传，单条失败容错隔离。
+
+> [!note] 另有「📊 单次问答」Tab：把 Excel / CSV / JSON / Parquet / PDF 等文件直接发进上下文，用中文自然语言分析表格数据（自动识别编码，GBK 不乱码）。
 
 ---
 
@@ -105,30 +104,6 @@ uv run uvicorn excel_co_pilot.main:create_app --factory --port 8000
 
 ---
 
-### 🗂️ 项目结构
-
-```
-src/excel_co_pilot/
-├── main.py            # 入口：FastAPI（create_app）+ Gradio（main）
-├── config.py          # Pydantic 配置（读取 .env，含 KB 配置）
-├── core/              # 数据加载（DataLoader）+ 会话门面（Session）
-├── kb/                # 知识库 RAG
-│   ├── loader.py      # 多格式文档解析（PDF/MD/TXT/DOCX/PPTX/XLSX）
-│   ├── splitter.py    # 父子块切分（标题层级 → 语义窗口）
-│   ├── db.py          # SQLite 单一事实源（SSOT）
-│   ├── indexer.py     # ChromaDB 向量索引（可重建）
-│   ├── ingest.py      # 摄入管道（MD5 去重 / 增量）
-│   ├── retriever.py   # 混合检索（向量 + BM25 → RRF → 重排）
-│   ├── qa_engine.py   # RAG 问答（改写反思 / 拒答 / 引用溯源 / 流式）
-│   ├── providers/     # 可插拔 Embedding / Rerank / LLM
-│   └── services.py    # 组件装配（进程级单例）
-├── services/          # LLM 网关
-├── ui/                # Gradio 界面（单次问答 + 知识库 Tab）
-└── utils/             # 日志 / 异常 / 校验 / 重试
-```
-
----
-
 ### ✅ 测试
 
 ```bash
@@ -163,4 +138,4 @@ uv run python -m pytest
 
 ### 🧰 技术栈
 
-Python 3.14 · Pandas · Gradio · FastAPI · pdfplumber · Loguru · Pydantic Settings · ChromaDB · rank-bm25 · jieba · PyMuPDF
+Python 3.14 · LangGraph · Pandas · Gradio · FastAPI · pdfplumber · Loguru · Pydantic Settings · ChromaDB · rank-bm25 · jieba · PyMuPDF

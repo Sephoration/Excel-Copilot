@@ -1,7 +1,8 @@
-"""会话门面：把 LLM 网关与上下文记忆串成一个对 UI/API 友好的入口。
+"""会话门面：把 LLM 网关、多表管理与上下文记忆串成一个对 UI/API 友好的入口。
 
-「单次问答」模式：发送多少文件，就把多少文件解构成文本追加进上下文，
-问答时把「上下文 + 问题」直接发给大模型，不做数据分析 Agent。
+两种问答模式：
+- 「简单问答」：文件解构成文本追加进上下文，直接发给大模型
+- 「表格分析」：表格注册进 TableManager，由 LangGraph Agent 选工具分析（含多表联表）
 """
 
 from __future__ import annotations
@@ -11,11 +12,14 @@ from pathlib import Path
 
 from ..config import apply_llm_config, settings
 from ..services.llm_gateway import LLMGateway
+from .agent import analyze_stream
 from .data_loader import DataLoader
+from .kb_context import retrieve_kb_context
+from .table_manager import TableManager
 
 
 class Session:
-    """单个会话：持有 LLM 网关（可选）与上下文记忆。"""
+    """单个会话：持有 LLM 网关（可选）、上下文记忆与多表管理器。"""
 
     def __init__(self, session_id: str | None = None) -> None:
         self.session_id = session_id or uuid.uuid4().hex[:12]
@@ -24,6 +28,7 @@ class Session:
         self._llm_config: dict[str, str] = {}
         self.history: list[dict[str, str]] = []
         self.context: list[dict[str, str]] = []  # 上下文记忆：[{name, text}]
+        self.tables = TableManager()  # 多表管理器（表格分析）
 
     # -- LLM -------------------------------------------------------------
 
@@ -104,6 +109,35 @@ class Session:
 
     def clear_context(self) -> None:
         self.context.clear()
+
+    # -- 多表管理（表格分析） ----------------------------------------------
+
+    def add_table(self, path: str | Path, sheet_name: str | None = None) -> dict:
+        """把表格文件（CSV/XLSX/XLS）注册进多表管理器，返回 {id, name, info}。"""
+        table_id, structure = self.tables.add_table(path, sheet_name)
+        info = self.tables.get_table_info(table_id)
+        return {
+            "id": table_id,
+            "name": info.filename if info else Path(path).name,
+            "info": structure,
+        }
+
+    async def analyze_chat(
+        self, question: str, history: list[dict[str, str]] | None = None
+    ):
+        """表格分析问答：LangGraph Agent 事件流（工具调用 / 结果 / 流式回答）。
+
+        使用说明：调用方以 `async for event in session.analyze_chat(...)` 消费事件。
+        知识库检索是增强项：由 kb_context 注入器统一负责超时与失败降级。
+        """
+        knowledge_context = retrieve_kb_context(question)
+        async for event in analyze_stream(
+            question,
+            history=history,
+            manager=self.tables,
+            knowledge_context=knowledge_context,
+        ):
+            yield event
 
     def simple_chat(self, question: str, history: list[dict] | None = None) -> str:
         """简单问答：上下文 + 最近若干轮历史 + 问题，直接发给大模型。"""

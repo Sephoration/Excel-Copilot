@@ -84,9 +84,7 @@ class KbConfig:
                 0.42,
                 settings.kb_refusal_absolute_threshold,
             ),
-            "margin": _threshold(
-                "KB_REFUSAL_MARGIN", 0.05, settings.kb_refusal_margin
-            ),
+            "margin": _threshold("KB_REFUSAL_MARGIN", 0.05, settings.kb_refusal_margin),
         }
         self.splitter = {
             "chunk_size": settings.kb_chunk_size,

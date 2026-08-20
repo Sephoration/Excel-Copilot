@@ -9,145 +9,358 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-
 import gradio as gr
 
 from ..config import settings
 from ..core.session import Session
+from .analysis_tab import _analysis_workspace
 from .kb_tab import build_kb_tab
-from .progress import PROGRESS_CSS, progress_html
+from .progress import PROGRESS_CSS
 
-_CSS = """
-/* ---------- 全局 ---------- */
-/* 全局：固定高度内容区 + 稳定滚动条，Tab 切换不抖动不变形 */
-.gradio-container { max-width: 1000px !important; margin: 0 auto !important; }
+_CSS = (
+    """
+/* ================= 全局（浅色 Linear/Notion 风格） ================= */
+.gradio-container { max-width: 1100px !important; margin: 0 auto !important; }
 html { scrollbar-gutter: stable; }
 .tabs { min-height: 620px !important; }
-body { background: linear-gradient(160deg, #0f172a 0%, #1e293b 100%) fixed !important; }
+body { background: #f7f8fa !important; }
 footer { display: none !important; }
 .gradio-container .tabs { border: none !important; background: transparent !important; }
 
-/* ---------- 首页 ---------- */
-.hero-box { text-align: center; padding: 3.2rem 1rem 1.6rem; }
+/* ================= 首页 ================= */
+.hero-box { text-align: center; padding: 3rem 1rem 1.2rem; }
 .hero-title {
-    font-size: 2.9rem !important; font-weight: 800 !important; letter-spacing: 1px;
-    background: linear-gradient(90deg, #60a5fa, #a78bfa, #f472b6);
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-    line-height: 1.3 !important;
+    font-size: 2.7rem !important; font-weight: 800 !important;
+    letter-spacing: -.5px; color: #1a1d21 !important; line-height: 1.25 !important;
 }
-.hero-sub { color: #94a3b8 !important; font-size: 1.05rem !important; margin-top: .8rem !important; }
-.hero-badge { text-align: center; margin: .6rem 0 1.2rem; }
+.hero-sub { color: #6b7280 !important; font-size: 1.05rem !important; margin-top: .8rem !important; }
+.hero-badge { text-align: center; margin: .9rem 0 1rem; }
+.badge-pill {
+    display: inline-block; border-radius: 999px; padding: .3rem .9rem;
+    font-size: .82rem !important; font-weight: 600 !important;
+}
+.badge-pill.ok { background: #ecfdf5 !important; color: #047857 !important; border: 1px solid #a7f3d0 !important; }
+.badge-pill.warn { background: #fffbeb !important; color: #b45309 !important; border: 1px solid #fde68a !important; }
+.hero-feats {
+    display: flex !important; gap: .6rem !important; justify-content: center !important;
+    flex-wrap: wrap !important; margin: .2rem 0 1.8rem !important;
+}
+.hero-feats span {
+    background: #fff !important; border: 1px solid #e6e8ec !important;
+    border-radius: 999px !important; padding: .25rem .8rem !important;
+    font-size: .8rem !important; color: #6b7280 !important;
+}
 
-.mode-grid { display: grid !important; grid-template-columns: 1fr 1fr; gap: 1.4rem; padding: 1rem 0 2rem; }
+.mode-grid { display: grid !important; grid-template-columns: 1fr 1fr; gap: 1.2rem; padding: 1rem 0 2rem; }
 @media (max-width: 800px) { .mode-grid { grid-template-columns: 1fr; } }
 
 .mode-card {
-    border-radius: 18px !important; padding: 1.6rem 1.4rem !important;
-    background: rgba(30, 41, 59, .92) !important; border: 1px solid rgba(148, 163, 184, .18) !important;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, .35) !important;
+    border-radius: 14px !important; padding: 1.5rem 1.4rem !important;
+    background: #fff !important; border: 1px solid #e6e8ec !important;
+    box-shadow: 0 1px 3px rgba(16, 24, 40, .06) !important;
     cursor: pointer; text-align: left;
     transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
-    min-height: 195px;
+    min-height: 185px;
 }
-.mode-card:hover { transform: translateY(-5px); box-shadow: 0 18px 42px rgba(0,0,0,.45) !important; }
-.mode-card .mode-emoji { font-size: 2.2rem; display: block; margin-bottom: .6rem; }
-.mode-card .mode-name { font-size: 1.35rem !important; font-weight: 700 !important; color: #e2e8f0 !important; }
-.mode-card .mode-desc { color: #94a3b8 !important; font-size: .92rem !important; margin-top: .4rem !important; }
-.mode-card .mode-tag { display: inline-block; margin-top: .8rem; font-size: .78rem; color: #60a5fa; }
-#analysis_card { border-left: 4px solid #60a5fa; }
-#kb_card { border-left: 4px solid #a78bfa; }
+.mode-card:hover {
+    transform: translateY(-3px); border-color: #c7d2fe !important;
+    box-shadow: 0 10px 26px rgba(16, 24, 40, .10) !important;
+}
+.mode-card .mode-emoji { font-size: 2rem; display: block; margin-bottom: .6rem; }
+.mode-card .mode-name { font-size: 1.3rem !important; font-weight: 700 !important; color: #1a1d21 !important; }
+.mode-card .mode-desc { color: #6b7280 !important; font-size: .92rem !important; margin-top: .4rem !important; line-height: 1.6 !important; }
+.mode-card .mode-tag {
+    display: inline-block; margin-top: .8rem; font-size: .78rem; font-weight: 600;
+    color: #4f46e5; background: #eef2ff; border-radius: 999px; padding: .15rem .6rem;
+}
+#analysis_card { border-top: 3px solid #4f46e5; }
+#kb_card { border-top: 3px solid #7c3aed; }
 
-/* 工作区左右两栏（用 CSS grid 强制并排，避免 Gradio Row 换行） */
-.two-pane { display: grid !important; grid-template-columns: minmax(280px, 1fr) 2.4fr; gap: 1.2rem; align-items: start !important; }
+/* 工作区左右两栏：左栏固定宽度 + 右栏自适应（flex 语义的 grid） */
+.two-pane { display: grid !important; grid-template-columns: 300px 1fr; gap: 1rem; align-items: start !important; }
 @media (max-width: 900px) { .two-pane { grid-template-columns: 1fr; } }
 
-/* ---------- 工作区标题 ---------- */
-.section-head { padding: .8rem 0 .4rem; }
-.section-title { font-size: 1.5rem !important; font-weight: 700 !important; color: #e2e8f0 !important; }
-.section-sub { color: #94a3b8 !important; font-size: .95rem !important; }
+/* ================= 工作区标题 ================= */
+.section-head { padding: .9rem 0 .4rem; }
+.section-title { font-size: 1.45rem !important; font-weight: 700 !important; color: #1a1d21 !important; }
+.section-sub { color: #6b7280 !important; font-size: .93rem !important; }
 
-/* 组件配色（深色面板下保持可读） */
-.gr-box, .gr-panel { background: rgba(30, 41, 59, .85) !important; border-color: rgba(148,163,184,.15) !important; border-radius: 12px !important; }
-label, .gr-text, .gr-markdown { color: #e2e8f0; }
-.gr-button-primary { background: linear-gradient(90deg, #3b82f6, #8b5cf6) !important; border: none !important; }
+/* ================= 侧栏面板（整体一张卡片，内部分割线） ================= */
+.side-panel {
+    background: #fff !important; border: 1px solid #e6e8ec !important;
+    border-radius: 12px !important; padding: 1rem 1.05rem !important;
+    box-shadow: 0 1px 3px rgba(16, 24, 40, .05) !important;
+    align-self: start !important;
+}
+.side-panel .side-section { padding: .3rem 0; }
+.side-panel .side-section + .side-section {
+    border-top: 1px solid #eef0f3; margin-top: .9rem; padding-top: 1.05rem;
+}
+.side-panel h3 {
+    font-size: .95rem !important; font-weight: 700 !important; color: #1a1d21 !important;
+    margin: 0 0 .6rem !important;
+}
+.side-panel label, .side-panel .label-wrap { font-size: .82rem !important; color: #6b7280 !important; }
 
-/* ---------- 知识库左窗紧凑化 ---------- */
-.kb-side { gap: .5rem !important; }
+/* ================= 工作台模式条 ================= */
+.mode-bar {
+    display: flex !important; align-items: center !important; gap: .6rem !important;
+    padding: .5rem .8rem !important; background: #eef2ff !important;
+    border: 1px solid #c7d2fe !important; border-radius: 10px !important;
+    margin-bottom: .6rem !important; font-size: .88rem !important; color: #3730a3 !important;
+}
+.mode-bar .mode-pill {
+    background: #4f46e5 !important; color: #fff !important; border-radius: 999px !important;
+    padding: .1rem .55rem !important; font-size: .75rem !important; font-weight: 600 !important;
+    white-space: nowrap !important;
+}
+.mode-bar .mode-active { font-weight: 600 !important; }
+
+/* ================= 工具链面板 ================= */
+.tool-chain {
+    border: 1px solid #e6e8ec !important; border-radius: 12px !important;
+    background: #fff !important; padding: .7rem .85rem !important;
+    margin: .4rem 0 .8rem !important; font-size: .84rem !important;
+    max-height: 190px !important; overflow-y: auto !important;
+}
+.tool-chain-head {
+    font-weight: 700 !important; color: #1a1d21 !important; margin-bottom: .45rem !important;
+    display: flex !important; align-items: center !important; gap: .45rem !important;
+}
+.tool-chain-count {
+    background: #eef2ff !important; color: #4f46e5 !important; border-radius: 999px !important;
+    padding: .05rem .5rem !important; font-size: .72rem !important; font-weight: 600 !important;
+}
+.tool-chain-empty { color: #9ca3af !important; font-size: .84rem !important; }
+.tool-step {
+    border: 1px solid #eef0f3 !important; border-left: 3px solid #ed8936 !important;
+    border-radius: 9px !important; padding: .45rem .6rem !important;
+    margin: .35rem 0 !important; background: #fafbfc !important;
+}
+.tool-step-idx {
+    display: inline-flex !important; align-items: center !important; justify-content: center !important;
+    width: 18px !important; height: 18px !important; border-radius: 50% !important;
+    background: #667eea !important; color: #fff !important;
+    font-size: .68rem !important; font-weight: 700 !important; margin-right: .4rem !important;
+}
+.tool-step-name {
+    font-weight: 600 !important; font-size: .76rem !important;
+    background: #fef3cd !important; color: #856404 !important;
+    padding: 2px 8px !important; border-radius: 4px !important;
+    font-family: ui-monospace, monospace !important;
+}
+.tool-step-status { float: right !important; font-size: .72rem !important; font-weight: 600 !important; }
+.tool-step-status.running { color: #ed8936 !important; }
+.tool-step-status.done { color: #48bb78 !important; }
+.tool-step-args, .tool-step-result {
+    color: #6b7280 !important; margin: .25rem 0 0 !important;
+    word-break: break-all !important; font-size: .76rem !important;
+    background: #fff !important; border-radius: 6px !important;
+    padding: 4px 8px !important; border: 1px solid #f1f3f5 !important;
+}
+.tool-step-result.success { border-left: 2px solid #48bb78 !important; }
+.tool-step-result.error { border-left: 2px solid #f56565 !important; }
+.tool-step-result.pending { border-left: 2px solid #ed8936 !important; }
+
+/* ================= 组件配色（浅色） ================= */
+.gr-box, .gr-panel { background: #fff !important; border-color: #e6e8ec !important; border-radius: 12px !important; }
+label, .gr-text, .gr-markdown { color: #1a1d21; }
+.gr-button-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important; border: none !important; }
+.gr-button-primary:hover { filter: brightness(1.08) !important; }
+
+/* ================= 细滚动条 ================= */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+/* ================= 状态点（pulse 动画） ================= */
+.badge-pill .dot {
+    display: inline-block !important; width: 7px !important; height: 7px !important;
+    border-radius: 50% !important; background: #22c55e !important;
+    margin-right: 6px !important; animation: dot-pulse 2s infinite !important;
+}
+@keyframes dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+
+/* ================= 聊天气泡（ExcelMind 风格） ================= */
+.gr-chatbot .message {
+    max-width: 82% !important;
+    animation: msg-in .25s ease !important;
+}
+@keyframes msg-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.gr-chatbot .message.user { justify-content: flex-end !important; }
+.gr-chatbot .message.user .message-content {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+    color: #fff !important; border: none !important;
+    border-radius: 14px 14px 4px 14px !important;
+    box-shadow: 0 2px 8px rgba(102, 126, 234, .28) !important;
+}
+.gr-chatbot .message.bot .message-content {
+    background: #fff !important;
+    border: 1px solid #e6e8ec !important;
+    border-radius: 14px 14px 14px 4px !important;
+    box-shadow: 0 1px 3px rgba(16, 24, 40, .05) !important;
+}
+
+/* ================= 表格列表（ExcelMind 风格卡片） ================= */
+.tables-list { display: flex !important; flex-direction: column !important; gap: 6px !important; }
+.table-item {
+    display: flex !important; align-items: center !important; gap: 10px !important;
+    padding: 9px 12px !important; background: #fafbfc !important;
+    border: 1px solid #eef0f3 !important; border-radius: 8px !important;
+    transition: all .18s ease !important;
+}
+.table-item:hover { background: #f5f5ff !important; border-color: #a5b4fc !important; }
+.table-item.active {
+    background: linear-gradient(135deg, #667eea12 0%, #764ba212 100%) !important;
+    border-color: #667eea !important; box-shadow: 0 1px 4px rgba(102, 126, 234, .18) !important;
+}
+.table-icon { font-size: 1rem !important; flex-shrink: 0 !important; }
+.table-info { flex: 1 !important; min-width: 0 !important; }
+.table-name {
+    font-weight: 600 !important; font-size: .82rem !important; color: #1a1d21 !important;
+    white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important;
+    display: block !important;
+}
+.table-meta { font-size: .68rem !important; color: #8e8ea0 !important; margin-top: 2px !important; display: block !important; }
+.joined-badge { font-size: .72rem !important; }
+.tables-empty { text-align: center !important; padding: 18px !important; color: #9ca3af !important; font-size: .82rem !important; }
+
+/* ================= 聊天空状态 ================= */
+.chat-empty {
+    display: flex !important; flex-direction: column !important; align-items: center !important;
+    justify-content: center !important; padding: 2.2rem 1rem !important;
+    color: #9ca3af !important; text-align: center !important;
+}
+.chat-empty-icon { font-size: 2.6rem !important; margin-bottom: .6rem !important; opacity: .6 !important; }
+.chat-empty h3 { color: #6b7280 !important; font-size: 1rem !important; margin: 0 0 .3rem !important; }
+.chat-empty p { font-size: .82rem !important; margin: 0 !important; }
+
+/* ================= 首页：隐私标签 + 折叠面板增强 ================= */
+.privacy-tag {
+    display: inline-block !important; margin-bottom: .6rem !important;
+    background: #ecfdf5 !important; color: #047857 !important;
+    border: 1px solid #a7f3d0 !important; border-radius: 999px !important;
+    padding: .25rem .85rem !important; font-size: .8rem !important; font-weight: 600 !important;
+}
+.gr-accordion {
+    border: 1px solid #e6e8ec !important; border-radius: 10px !important;
+    background: #fff !important; margin: .8rem auto 1.2rem !important;
+    max-width: 640px !important;
+}
+.gr-accordion summary {
+    padding: .7rem 1rem !important; font-weight: 600 !important;
+    cursor: pointer !important; color: #1a1d21 !important;
+}
+.gr-accordion summary:hover { color: #4f46e5 !important; }
+
+/* ================= 上传组件：虚线框 + hover 反馈 ================= */
+.gr-file, .upload-container {
+    border-style: dashed !important; border-color: #d1d5db !important;
+    transition: all .15s ease !important; background: #fff !important;
+}
+.gr-file:hover, .upload-container:hover {
+    border-color: #4f46e5 !important; background: #f5f5ff !important;
+}
+
+/* ================= 聊天输入行：吸底常驻 ================= */
+.chat-input-sticky {
+    position: sticky !important; bottom: 0 !important; z-index: 5 !important;
+    background: #fff !important; border: 1px solid #e6e8ec !important;
+    border-radius: 12px !important; padding: .55rem .7rem !important;
+    box-shadow: 0 -4px 16px rgba(16, 24, 40, .05) !important;
+    margin-top: .6rem !important;
+}
+
+/* ================= 知识库 ================= */
+.kb-side {
+    gap: .5rem !important; background: #fff !important; border: 1px solid #e6e8ec !important;
+    border-radius: 12px !important; padding: .8rem .9rem !important;
+    box-shadow: 0 1px 3px rgba(16, 24, 40, .05) !important;
+}
 .kb-side-head { margin: .2rem 0 0 !important; }
-.kb-side-head h3 { font-size: 1.02rem !important; margin: .3rem 0 .15rem !important; color: #e2e8f0 !important; }
-.kb-side label, .kb-side .label-wrap { font-size: .82rem !important; }
+.kb-side-head h3 { font-size: 1rem !important; margin: .3rem 0 .15rem !important; color: #1a1d21 !important; }
+.kb-side label, .kb-side .label-wrap { font-size: .82rem !important; color: #6b7280 !important; }
 .kb-side .gr-button { flex-shrink: 1 !important; }
-/* ---------- 知识库：环境窗格导航 ---------- */
 .env-panes label {
     display: block !important;
-    border: 1px solid rgba(148,163,184,.22) !important;
+    border: 1px solid #e6e8ec !important;
     border-radius: 10px !important;
     margin: .3rem 0 !important;
     padding: .55rem .75rem !important;
     cursor: pointer !important;
     transition: all .15s ease !important;
-    background: rgba(30, 41, 59, .6) !important;
+    background: #fff !important;
     font-size: .95rem !important;
 }
-.env-panes label:hover {
-    border-color: #60a5fa !important;
-    transform: translateX(3px);
-}
+.env-panes label:hover { border-color: #a5b4fc !important; transform: translateX(3px); }
 .env-panes label:has(input:checked) {
-    border-color: #8b5cf6 !important;
-    background: rgba(139, 92, 246, .16) !important;
-    box-shadow: 0 0 12px rgba(139, 92, 246, .35);
+    border-color: #7c3aed !important;
+    background: #f5f3ff !important;
+    box-shadow: 0 0 0 1px #7c3aed !important;
 }
-.env-panes input[type="radio"] { accent-color: #8b5cf6 !important; }
-/* ---------- 数据库详情面板 ---------- */
+.env-panes input[type="radio"] { accent-color: #7c3aed !important; }
 .kb-detail {
-    border: 1px solid rgba(148,163,184,.18) !important;
+    border: 1px solid #e6e8ec !important;
     border-radius: 12px !important;
     padding: .4rem .7rem .6rem !important;
     margin-top: .5rem !important;
-    background: rgba(15, 23, 42, .35) !important;
+    background: #fafbfc !important;
 }
-/* ---------- 右窗问答（美化边框） ---------- */
 .kb-chat-box {
-    border: 1px solid rgba(139, 92, 246, .5) !important;
+    border: 1px solid #ddd6fe !important;
     border-radius: 14px !important;
     padding: .8rem .9rem .9rem !important;
-    background: rgba(30, 41, 59, .55) !important;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, .35), inset 0 0 0 1px rgba(139,92,246,.08) !important;
+    background: #fff !important;
+    box-shadow: 0 1px 4px rgba(16, 24, 40, .05) !important;
 }
-.kb-chat-box .gr-chatbot {
-    border-radius: 10px !important;
-    border: 1px solid rgba(148,163,184,.2) !important;
-}
+.kb-chat-box .gr-chatbot { border-radius: 10px !important; border: 1px solid #e6e8ec !important; }
 .kb-answer {
-    border-left: 4px solid #8b5cf6 !important;
-    background: rgba(139, 92, 246, .1) !important;
+    border-left: 4px solid #7c3aed !important;
+    background: #f5f3ff !important;
     border-radius: 0 10px 10px 0 !important;
     padding: .7rem .9rem !important;
     margin-top: .5rem !important;
     font-size: .95rem !important;
     line-height: 1.65 !important;
 }
-""" + PROGRESS_CSS
+"""
+    + PROGRESS_CSS
+)
 
 
 def _status_badge(session: Session) -> str:
     if session.llm_ready:
-        return f"✅ LLM 已就绪（{session.llm_model_name}）—— 单次问答 / 知识库问答均可用"
-    return "⚠️ 未配置 LLM —— 请先在下方向「模型配置」填写 API Key"
+        return (
+            f"<span class='badge-pill ok'><span class='dot'></span>LLM 已就绪 · {session.llm_model_name}</span>"
+        )
+    return "<span class='badge-pill warn'><span class='dot'></span>未配置 LLM —— 请先在下方向「模型配置」填写 API Key</span>"
 
 
 def _home_view(session: Session, tabs: gr.Tabs) -> gr.Markdown:
     """首页 Tab：Hero + 模型配置 + 模式卡片（点击卡片切到对应 Tab）。"""
     with gr.Column(elem_classes="hero-box"):
         gr.Markdown(
+            "<div class='privacy-tag'>🏠 本地运行 · 数据 100% 私有</div>",
+            elem_classes="hero-badge",
+        )
+        gr.Markdown(
             "# Excel Co-Pilot\n"
             "<span class='hero-sub'>本地优先 · AI 数据工作台 —— 数据不出域，全链路本地/自主可控</span>",
             elem_classes="hero-title",
         )
         badge = gr.Markdown(_status_badge(session), elem_classes="hero-badge")
+
+        gr.Markdown(
+            "<div class='hero-feats'>"
+            "<span>🔒 本地优先 · 数据不出域</span>"
+            "<span>📊 结构化问数 · 多表联表</span>"
+            "<span>📚 RAG 知识库 · 引用溯源</span>"
+            "</div>"
+        )
 
         with gr.Accordion("⚙️ 模型配置（DeepSeek 或任意 OpenAI 兼容端点）", open=False):
             with gr.Row():
@@ -172,9 +385,9 @@ def _home_view(session: Session, tabs: gr.Tabs) -> gr.Markdown:
                 gr.Markdown(
                     "<span class='mode-emoji'>📊</span>"
                     "<span class='mode-name'>单次问答</span>"
-                    "<div class='mode-desc'>把文件直接发送给 AI 作为上下文，"
-                    "发送几个文件，上下文就加几个，然后围绕它们简单问答。</div>"
-                    "<span class='mode-tag'>文件进上下文 · 即时问答</span>"
+                    "<div class='mode-desc'>表格智能分析：上传多张表，AI 自动筛选、聚合、联表；"
+                    "文档可直接发送进上下文问答。</div>"
+                    "<span class='mode-tag'>结构化问数 · 多表联表 · 工具调用</span>"
                 )
                 to_analysis = gr.Button("进入单次问答", variant="primary")
             with gr.Column(elem_id="kb_card", elem_classes="mode-card", scale=1):
@@ -212,119 +425,6 @@ def _home_view(session: Session, tabs: gr.Tabs) -> gr.Markdown:
     to_analysis.click(lambda: _goto("analysis"), None, tabs)
     to_kb.click(lambda: _goto("kb"), None, tabs)
     return badge
-
-
-def _analysis_workspace(state: gr.State) -> None:
-    """单次问答：左窗发送文件，右窗简单问答 + 回答进度条。"""
-    with gr.Column():
-        gr.Markdown(
-            "<span class='section-title'>📊 单次问答</span>"
-            "<span class='section-sub' style='display:block'>把文件发送给 AI 作为上下文，然后直接提问</span>",
-            elem_classes="section-head",
-        )
-
-        with gr.Column(elem_classes="two-pane"):
-            # 左：发送文件（小窗）
-            with gr.Column(scale=1, min_width=280):
-                gr.Markdown("### 📤 发送文件")
-                upload = gr.File(
-                    label="支持 CSV / Excel / PDF / Word / MD / TXT / PPT",
-                    file_count="multiple",
-                    file_types=[
-                        ".csv",
-                        ".xlsx",
-                        ".xls",
-                        ".pdf",
-                        ".docx",
-                        ".pptx",
-                        ".md",
-                        ".markdown",
-                        ".txt",
-                    ],
-                    type="filepath",
-                )
-                with gr.Row():
-                    send_btn = gr.Button("📥 发送给 AI", variant="primary", scale=2)
-                    clear_btn = gr.Button("🗑 清空", scale=1)
-                context_md = gr.Markdown("（尚未发送任何文件）")
-
-            # 右：简单问答（大窗）
-            with gr.Column(scale=3):
-                gr.Markdown("### 💬 简单问答")
-                chatbot = gr.Chatbot(height=460, label="对话")
-                ai_progress = gr.HTML(progress_html("", None))
-                with gr.Row():
-                    msg = gr.Textbox(
-                        placeholder="例如：这些文件里，3 月份的总销售额是多少？",
-                        scale=4,
-                        show_label=False,
-                    )
-                    ask_btn = gr.Button("发送", variant="primary", scale=1)
-                chat_history = gr.State([])  # [(user, assistant), ...]
-
-        # ---- 事件 ----
-
-        def _context_md(results: list[dict]) -> str:
-            if not results:
-                return "（尚未发送任何文件）"
-            lines = ["✅ 已发送到上下文："]
-            for r in results:
-                lines.append(f"- **{r['name']}**（{r['chars']} 字符）")
-            return "\n".join(lines)
-
-        def on_send(files: Any, session: Session):
-            if not files:
-                return "（请先选择文件）", _context_md(session.context)
-            if isinstance(files, str):
-                files = [files]
-            try:
-                results = session.attach_files([Path(f) for f in files])
-            except Exception as exc:
-                return f"❌ 发送失败：{exc}", _context_md(session.context)
-            names = "、".join(r["name"] for r in results)
-            return (
-                f"📥 已发送 {len(results)} 个文件（{names}），现在可以提问了。",
-                _context_md(session.context),
-            )
-
-        def on_clear(session: Session):
-            session.clear_context()
-            return "🗑 上下文已清空", "（尚未发送任何文件）"
-
-        def _to_messages(history: list) -> list[dict]:
-            """Gradio 6 Chatbot 只接受 messages 格式：[(u, a), ...] → dict 列表。"""
-            msgs: list[dict] = []
-            for u, a in history:
-                msgs.append({"role": "user", "content": u})
-                msgs.append({"role": "assistant", "content": a})
-            return msgs
-
-        def on_ask(question: str, history: list, session: Session):
-            if not question or not question.strip():
-                yield _to_messages(history or []), progress_html("", None), "", history or []
-                return
-            history = history or []
-            llm_history = _to_messages(history)
-            yield _to_messages(history), progress_html("⏳ 已收到问题，正在整理上下文…", 20), "", history
-            yield _to_messages(history), progress_html("⏳ AI 正在回答…", 60), "", history
-            try:
-                reply = session.simple_chat(question.strip(), history=llm_history)
-            except Exception as exc:
-                reply = f"❌ 出错了：{exc}"
-            new_history = history + [(question.strip(), reply)]
-            yield _to_messages(new_history), progress_html("✅ 回答完成", 100), "", new_history
-
-        send_btn.click(on_send, [upload, state], [context_md, context_md])
-        clear_btn.click(on_clear, [state], [context_md, context_md])
-        # show_progress="hidden"：关掉 Gradio 每个组件的队列角标，只留自定义进度条
-        ask_btn.click(
-            on_ask, [msg, chat_history, state], [chatbot, ai_progress, msg, chat_history],
-            show_progress="hidden",
-        )
-        msg.submit(
-            on_ask, [msg, chat_history, state], [chatbot, ai_progress, msg, chat_history],
-            show_progress="hidden",
-        )
 
 
 def _kb_workspace() -> None:
@@ -366,7 +466,8 @@ def build_ui() -> gr.Blocks:
 
 # Gradio 6：css / theme 需在 launch() 时传入（见 main.py）
 APP_CSS = _CSS
-APP_THEME = gr.themes.Soft(primary_hue="blue", neutral_hue="slate")
+APP_THEME = gr.themes.Soft(primary_hue="indigo", neutral_hue="slate")
 
 
 __all__ = ["APP_CSS", "APP_THEME", "build_ui"]
+

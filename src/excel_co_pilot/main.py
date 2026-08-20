@@ -71,9 +71,7 @@ def create_app():
         }
 
     @app.post("/kb/upload")
-    async def kb_upload(
-        file: UploadFile = File(...), library: str = "default"
-    ) -> dict:
+    async def kb_upload(file: UploadFile = File(...), library: str = "default") -> dict:
         from .kb.services import get_services
 
         svc = get_services()
