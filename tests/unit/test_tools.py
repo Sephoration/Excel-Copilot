@@ -135,3 +135,46 @@ def test_result_json_serializable(bound_manager):
         {"group_by": "分公司", "agg_column": "移动新增", "agg_func": "sum", "limit": 10}
     )
     json.dumps(result, ensure_ascii=False)  # 不应抛异常
+
+
+def test_filter_and_search_respect_index_and_literal_patterns(bound_manager):
+    df = bound_manager.get_active_df()
+    df.index = [10, 20, 30, 40, 50, 60]
+    df["编号"] = ["001", "1", "002", "1", None, "003"]
+    df["备注"] = ["a.b", "axb", "a[b", "a.b", None, "text"]
+
+    result = filter_data.invoke({"column": "编号", "operator": "==", "value": "001"})
+    assert result["total_rows"] == 1
+    assert result["data"][0]["编号"] == "001"
+    result = aggregate_data.invoke({"column": "移动新增", "agg_func": "sum", "filters": [
+        {"column": "编号", "operator": "==", "value": "1"}
+    ]})
+    assert result["result"] == 280
+    result = filter_data.invoke({"column": "备注", "operator": "contains", "value": "."})
+    assert result["total_rows"] == 2
+    assert search_data.invoke({"keyword": "[", "columns": ["备注"]})["total_rows"] == 1
+    assert search_data.invoke({"keyword": "nan", "columns": ["备注"]})["total_rows"] == 0
+
+
+def test_filter_numeric_input_validation_and_nulls(bound_manager):
+    df = bound_manager.get_active_df()
+    df["large"] = [9007199254740993, 9007199254740992, 0, 1, 2, 3]
+    result = filter_data.invoke({"column": "large", "operator": "==", "value": "9007199254740993"})
+    assert result["total_rows"] == 1
+    assert result["data"][0]["large"] == 9007199254740993
+    assert "error" in filter_data.invoke({"column": "large", "operator": ">", "value": "nan"})
+    result = filter_data.invoke({"column": "移动新增", "operator": "!=", "value": 100})
+    assert result["total_rows"] == 4
+
+
+def test_calculator_restricted_arithmetic_and_resource_limits():
+    expressions = ["math.sqrt(25) + pow(2, 3)", "sum([1,2,3])", "math.pi * 2",
+                   "(1).__class__", "2 ** 1000000000", "math.factorial(1000000000)",
+                   "[1] * 100000000", "1/0"]
+    results = calculate.invoke({"expressions": expressions})["results"]
+    assert results[expressions[0]] == 13
+    assert results[expressions[1]] == 6
+    assert results[expressions[2]] == pytest.approx(6.283185307179586)
+    for expression in expressions[3:]:
+        assert results[expression].startswith("Error:")
+    assert "error" in calculate.invoke({"expressions": ["1"] * 51})

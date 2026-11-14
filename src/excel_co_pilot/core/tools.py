@@ -14,6 +14,8 @@ import pandas as pd
 from langchain_core.tools import tool
 
 from ..config import settings
+from .data_quality_tool import inspect_data_quality
+from .safe_calculator import evaluate_expression
 from .table_manager import get_current_manager
 
 
@@ -85,30 +87,40 @@ def _get_filter_mask(
         raise ValueError(f"列 '{column}' 不存在，可用列: {list(df.columns)}")
 
     col = df[column]
-    try:
-        numeric_value = float(value)
-    except (ValueError, TypeError):
-        numeric_value = None
-    compare_value = numeric_value if numeric_value is not None else value
+    if operator in {"contains", "startswith", "endswith"}:
+        text = col.astype("string")
+        if operator == "contains":
+            return text.str.contains(str(value), case=False, regex=False, na=False)
+        if operator == "startswith":
+            return text.str.startswith(str(value), na=False)
+        return text.str.endswith(str(value), na=False)
 
-    if operator == "==":
-        return col == compare_value
-    if operator == "!=":
-        return col != compare_value
-    if operator == ">":
-        return col > compare_value
-    if operator == "<":
-        return col < compare_value
-    if operator == ">=":
-        return col >= compare_value
-    if operator == "<=":
-        return col <= compare_value
-    if operator == "contains":
-        return col.astype(str).str.contains(str(value), case=False, na=False)
-    if operator == "startswith":
-        return col.astype(str).str.startswith(str(value), na=False)
-    if operator == "endswith":
-        return col.astype(str).str.endswith(str(value), na=False)
+    # 仅数值列使用数值比较。字符串列中的 "001" 可能是编号，不能转为 1。
+    compare_value = value
+    if pd.api.types.is_numeric_dtype(col.dtype) and not pd.api.types.is_bool_dtype(col.dtype):
+        try:
+            if isinstance(value, int) and not isinstance(value, bool):
+                compare_value = value
+            elif isinstance(value, str) and value.strip().lstrip("+-").isdigit():
+                compare_value = int(value)
+            else:
+                compare_value = float(value)
+            if isinstance(compare_value, float) and not math.isfinite(compare_value):
+                raise ValueError("筛选值必须是有限数值")
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValueError(f"列 '{column}' 是数值列，筛选值必须是数值") from exc
+    elif pd.api.types.is_string_dtype(col.dtype) and not isinstance(value, str):
+        compare_value = str(value)
+    operations = {
+        "==": lambda: col == compare_value,
+        "!=": lambda: col != compare_value,
+        ">": lambda: col > compare_value,
+        "<": lambda: col < compare_value,
+        ">=": lambda: col >= compare_value,
+        "<=": lambda: col <= compare_value,
+    }
+    if operator in operations:
+        return (operations[operator]() & col.notna()).fillna(False)
     raise ValueError(f"不支持的运算符: {operator}")
 
 
@@ -118,7 +130,7 @@ def _apply_filters(
     """应用筛选条件列表，出错时抛出带上下文的 ValueError。"""
     if not filters:
         return df
-    final_mask = pd.Series([True] * len(df))
+    final_mask = pd.Series(True, index=df.index)
     for f in filters:
         f_col, f_op, f_val = f.get("column"), f.get("operator"), f.get("value")
         if f_col and f_op and f_val is not None:
@@ -152,7 +164,7 @@ def filter_data(
     """
     try:
         df = _active_df().copy()
-        final_mask = pd.Series([True] * len(df))
+        final_mask = pd.Series(True, index=df.index)
         if column and operator and value is not None:
             final_mask &= _get_filter_mask(df, column, operator, value)
         if filters:
@@ -297,10 +309,10 @@ def search_data(
     try:
         df = _active_df()
         search_cols = columns if columns else df.columns
-        mask = pd.Series([False] * len(df))
+        mask = pd.Series(False, index=df.index)
         for col in search_cols:
             if col in df.columns:
-                mask |= df[col].astype(str).str.contains(keyword, case=False, na=False)
+                mask |= df[col].astype("string").str.contains(keyword, case=False, regex=False, na=False)
         return _df_to_result(df[mask], limit, select_columns)
     except Exception as e:
         return {"error": f"搜索出错: {e!s}"}
@@ -416,28 +428,18 @@ def get_current_time() -> dict[str, Any]:
 
 @tool
 def calculate(expressions: list[str]) -> dict[str, Any]:
-    """批量执行数学表达式计算（安全环境，禁内置函数）。
+    """批量计算基础算术和有限的数学函数（不执行 Python 代码）。
 
     Args:
-        expressions: 数学表达式列表，例如 ["(100+200)*0.5", "500/2"]
+        expressions: 最多 50 个数学表达式，如 ["(100+200)*0.5", "math.sqrt(25)"]
     """
-    safe_env = {
-        "abs": abs,
-        "round": round,
-        "min": min,
-        "max": max,
-        "sum": sum,
-        "pow": pow,
-        "math": math,
-    }
+    if len(expressions) > 50:
+        return {"error": "单次最多计算 50 个表达式"}
     results: dict[str, Any] = {}
     for expr in expressions:
         try:
-            if any(char in expr for char in ["__", "import", "eval", "exec", "open"]):
-                results[expr] = "Error: Unsafe expression"
-                continue
-            results[expr] = eval(expr, {"__builtins__": None}, safe_env)
-        except Exception as e:
+            results[expr] = evaluate_expression(expr)
+        except (ArithmeticError, ValueError, SyntaxError, TypeError, OverflowError, RecursionError) as e:
             results[expr] = f"Error: {e!s}"
     return {"results": results}
 
@@ -815,6 +817,7 @@ ALL_TOOLS = [
     get_column_stats,
     get_unique_values,
     get_data_preview,
+    inspect_data_quality,
     get_current_time,
     calculate,
     generate_chart,

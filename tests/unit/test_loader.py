@@ -39,3 +39,35 @@ def test_load_gbk_csv(tmp_path: Path):
     p.write_bytes(content)
     df = DataLoader().load(p)
     assert df.shape == (1, 2)
+
+
+def test_single_column_csv_preserves_semicolon_in_quoted_header(tmp_path: Path):
+    path = tmp_path / "single.csv"
+    path.write_text('"name;extra"\n"a;b"\n', encoding="utf-8")
+    df = DataLoader().load(path)
+    assert list(df.columns) == ["name;extra"]
+    assert df.iloc[0, 0] == "a;b"
+
+
+@pytest.mark.parametrize("separator", [";", "\t"])
+def test_csv_detects_delimiter_from_header(tmp_path: Path, separator: str):
+    path = tmp_path / "records.csv"
+    path.write_text(f'name{separator}value\nalpha{separator}10\n', encoding="utf-8")
+    df = DataLoader().load(path)
+    assert list(df.columns) == ["name", "value"]
+    assert df.iloc[0, 1] == 10
+
+
+def test_malformed_semicolon_csv_reports_error_instead_of_skipping(tmp_path: Path):
+    path = tmp_path / "broken.csv"
+    path.write_text('name;value\na;1\nb;2;unexpected\n', encoding="utf-8")
+    with pytest.raises(LoadError):
+        DataLoader().load(path)
+
+
+def test_encoding_sample_ending_mid_utf8_character(tmp_path: Path):
+    from excel_co_pilot.utils.encoding import detect_encoding
+
+    path = tmp_path / "utf8.csv"
+    path.write_text("a" * 7 + "中文", encoding="utf-8")
+    assert detect_encoding(path, sample_bytes=8) == "utf-8-sig"

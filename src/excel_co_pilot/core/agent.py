@@ -47,6 +47,20 @@ SYSTEM_PROMPT = """你是一个专业的 Excel 数据分析助手，帮助用户
 """
 
 
+def _message_text(content: Any) -> str:
+    """Extract visible text from either plain or structured model content."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part if isinstance(part, str) else str(part.get("text", ""))
+            for part in content
+            if isinstance(part, str)
+            or (isinstance(part, dict) and part.get("type") == "text")
+        )
+    return ""
+
+
 async def analyze_stream(
     question: str,
     history: list[dict[str, str]] | None = None,
@@ -84,6 +98,7 @@ async def _run(
     manager: TableManager,
     knowledge_context: str,
 ) -> AsyncGenerator[dict[str, Any]]:
+    thinking_done_sent = False
     try:
         excel_summary = manager.get_active_summary()
         ensure_llm_ready()
@@ -103,24 +118,25 @@ async def _run(
         active_info = manager.get_active_table_info()
         current_table = active_info.filename if active_info else "未知表"
         messages: list[Any] = []
-        for msg in history or []:
+        # Only recent, non-empty conversation is relevant to the current table.
+        for msg in (history or [])[-16:]:
+            content = msg.get("content", "")
+            if not isinstance(content, str) or not content.strip():
+                continue
             if msg.get("role") == "user":
-                messages.append(HumanMessage(content=msg.get("content", "")))
+                messages.append(HumanMessage(content=content))
             elif msg.get("role") == "assistant":
-                messages.append(AIMessage(content=msg.get("content", "")))
+                messages.append(AIMessage(content=content))
         messages.append(
             HumanMessage(content=f"[当前操作表: {current_table}] {question}")
         )
 
-        # 累积工具调用信息（args 按 index 累积，名称按 id 记录）
-        tool_names_by_id: dict[str, str] = {}
-        args_by_index: dict[int, str] = {}
-        tool_call_order: list[tuple[str, int]] = []
-        yielded_tool_ids: set[str] = set()
-        thinking_content = ""
+        # 工具调用的 id、名称和参数可能分散在多个 chunk 中；按 id 累积。
+        call_by_id: dict[str, dict[str, str]] = {}
+        call_id_by_index: dict[int, str] = {}
+        pending_by_index: dict[int, dict[str, str]] = {}
         final_content = ""
-        tool_call_yielded = False
-        thinking_done_sent = False
+        had_tool_result = False
 
         async for chunk in agent.astream(
             {"messages": messages}, stream_mode="messages", config=config
@@ -130,85 +146,92 @@ async def _run(
             msg, _meta = chunk[0], chunk[1]
 
             if isinstance(msg, AIMessageChunk):
-                content = getattr(msg, "content", "") or ""
+                content = _message_text(getattr(msg, "content", ""))
                 tool_call_chunks = getattr(msg, "tool_call_chunks", []) or []
 
                 if tool_call_chunks:
+                    # An intermediate assistant message may have text preceding a
+                    # tool call. It is not the final answer to show the user.
+                    final_content = ""
                     for tcc in tool_call_chunks:
                         tc_id = tcc.get("id")
-                        tc_name = tcc.get("name", "")
-                        tc_args = tcc.get("args", "")
-                        tc_index = tcc.get("index", 0)
-                        if tc_id and tc_name:
-                            if tc_id not in tool_names_by_id:
-                                tool_call_order.append((tc_id, tc_index))
-                                if not thinking_done_sent:
-                                    yield {"type": "thinking_done"}
-                                    thinking_done_sent = True
-                            tool_names_by_id[tc_id] = tc_name
-                        if tc_args:
-                            args_by_index[tc_index] = (
-                                args_by_index.get(tc_index, "") + tc_args
+                        tc_index = tcc.get("index")
+                        if tc_index is None:
+                            tc_index = 0
+                        if tc_id:
+                            call_id_by_index[tc_index] = tc_id
+                            state = call_by_id.setdefault(
+                                tc_id, {"name": "", "args": ""}
                             )
+                            previous = pending_by_index.pop(tc_index, None)
+                            if previous:
+                                state["name"] = previous["name"] or state["name"]
+                                state["args"] = previous["args"] + state["args"]
+                        else:
+                            mapped_id = call_id_by_index.get(tc_index)
+                            if mapped_id:
+                                state = call_by_id.setdefault(
+                                    mapped_id, {"name": "", "args": ""}
+                                )
+                            else:
+                                state = pending_by_index.setdefault(
+                                    tc_index, {"name": "", "args": ""}
+                                )
+                        if tcc.get("name"):
+                            state["name"] = tcc["name"]
+                        if tcc.get("args"):
+                            state["args"] += tcc["args"]
 
                 if content:
-                    if tool_call_yielded:
-                        final_content += content
-                        yield {"type": "token", "content": content}
-                    else:
-                        thinking_content += content
-                        yield {"type": "thinking", "content": thinking_content}
+                    final_content += content
 
             elif isinstance(msg, ToolMessage):
                 tool_call_id = getattr(msg, "tool_call_id", None)
                 tool_name = getattr(msg, "name", "tool")
                 tool_content = getattr(msg, "content", "")
 
-                if tool_call_id and tool_call_id not in yielded_tool_ids:
-                    yielded_tool_ids.add(tool_call_id)
-                    tool_call_yielded = True
-                    tc_index = 0
-                    for tid, idx in tool_call_order:
-                        if tid == tool_call_id:
-                            tc_index = idx
-                            break
-                    args_str = args_by_index.get(tc_index, "{}")
-                    try:
-                        args = json.loads(args_str)
-                    except json.JSONDecodeError:
-                        last_brace = args_str.rfind('{"')
-                        if last_brace >= 0:
-                            try:
-                                args = json.loads(args_str[last_brace:])
-                            except json.JSONDecodeError:
-                                args = {"raw": args_str}
-                        else:
-                            args = {"raw": args_str}
-                    yield {
-                        "type": "tool_call",
-                        "name": tool_names_by_id.get(tool_call_id, tool_name),
-                        "args": args,
-                    }
-                    args_by_index.pop(tc_index, None)
+                if not thinking_done_sent:
+                    yield {"type": "thinking_done"}
+                    thinking_done_sent = True
+                state = call_by_id.pop(tool_call_id, None) if tool_call_id else None
+                if state is None:
+                    state = {"name": tool_name, "args": "{}"}
+                args_str = state["args"] or "{}"
+                try:
+                    args = json.loads(args_str)
+                except (json.JSONDecodeError, TypeError):
+                    args = {"raw": args_str[:500]}
+                yield {
+                    "type": "tool_call",
+                    "name": state["name"] or tool_name,
+                    "args": args,
+                }
 
                 try:
                     result = json.loads(tool_content)
                 except (json.JSONDecodeError, TypeError):
-                    result = {"result": tool_content}
+                    result = {"result": _message_text(tool_content)}
                 yield {"type": "tool_result", "name": tool_name, "result": result}
+                had_tool_result = True
+                final_content = ""
+                call_id_by_index.clear()
+                pending_by_index.clear()
 
         # 流式结束
-        if not tool_call_yielded and thinking_content:
-            if not thinking_done_sent:
-                yield {"type": "thinking_done"}
+        if not thinking_done_sent:
+            yield {"type": "thinking_done"}
+        if final_content.strip():
             yield {"type": "clear_thinking"}
-            yield {"type": "token", "content": thinking_content}
-            yield {"type": "done", "content": thinking_content}
-        elif final_content:
+            yield {"type": "token", "content": final_content}
             yield {"type": "done", "content": final_content}
         else:
-            yield {"type": "done", "content": ""}
+            detail = (
+                "工具已执行，但模型没有给出最终回答"
+                if had_tool_result else "模型没有返回回答"
+            )
+            yield {"type": "error", "content": detail}
 
     except Exception as e:
-        yield {"type": "thinking_done"}
+        if not thinking_done_sent:
+            yield {"type": "thinking_done"}
         yield {"type": "error", "content": f"处理出错: {e!s}"}

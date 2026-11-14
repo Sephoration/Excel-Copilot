@@ -16,9 +16,50 @@ from typing import Any
 import pandas as pd
 
 from ..config import settings
-from ..utils.encoding import detect_encoding
+from .data_cleaning import clean_frame
+from .data_loader import DataLoader
 
-_EXCEL_SUFFIXES = (".xlsx", ".xls", ".xlsm")
+_EXCEL_SUFFIXES = (".xlsx", ".xlsm")
+_MAX_JOIN_ROWS = 1_000_000
+
+
+def _estimate_join_rows(
+    left: pd.DataFrame,
+    right: pd.DataFrame,
+    keys1: list[str],
+    keys2: list[str],
+    join_type: str,
+) -> int:
+    """按连接键计数，计算 pandas 连接结果行数，不展开笛卡尔积。"""
+    internal_keys = [f"_key_{i}" for i in range(len(keys1))]
+
+    def counts(frame: pd.DataFrame, keys: list[str], name: str) -> pd.DataFrame:
+        key_frame = frame.loc[:, keys].copy()
+        key_frame.columns = internal_keys
+        result = key_frame.groupby(
+            internal_keys, dropna=False, observed=True, sort=False
+        ).size().reset_index(name=name)
+        # 全为空的一组可能被推断成 float；统一为对象避免计数表因推断差异无法合并。
+        for key in internal_keys:
+            result[key] = result[key].astype(object)
+        return result
+
+    left_counts = counts(left, keys1, "_left_count")
+    right_counts = counts(right, keys2, "_right_count")
+    # 相同缺失键的匹配行为与 pd.merge 一致；计数表每键只有一行。
+    grouped = pd.merge(left_counts, right_counts, on=internal_keys, how="outer")
+    total = 0
+    rows = grouped[["_left_count", "_right_count"]].itertuples(index=False, name=None)
+    for left_count, right_count in rows:
+        lcount = 0 if pd.isna(left_count) else int(left_count)
+        rcount = 0 if pd.isna(right_count) else int(right_count)
+        if lcount and rcount:
+            total += lcount * rcount
+        elif lcount and join_type in ("left", "outer"):
+            total += lcount
+        elif rcount and join_type in ("right", "outer"):
+            total += rcount
+    return total
 
 
 @dataclass
@@ -43,6 +84,8 @@ class TableManager:
         self._frames: dict[str, pd.DataFrame] = {}
         self._table_infos: dict[str, TableInfo] = {}
         self._active_table_id: str | None = None
+        self._revisions: dict[str, int] = {}
+        self._undo_frames: dict[str, pd.DataFrame] = {}
 
     @property
     def is_loaded(self) -> bool:
@@ -56,7 +99,7 @@ class TableManager:
     def add_table(
         self, file_path: str | Path, sheet_name: str | None = None
     ) -> tuple[str, dict[str, Any]]:
-        """添加一张新表（CSV / XLSX / XLS / XLSM），自动设为活跃表。
+        """添加一张新表（CSV / XLSX / XLSM），自动设为活跃表。
 
         Returns:
             (表ID, 结构信息)
@@ -75,6 +118,7 @@ class TableManager:
         structure = _structure(df, file_path, sheet)
         table_id = str(uuid.uuid4())[:8]
         self._frames[table_id] = df
+        self._revisions[table_id] = 0
         self._table_infos[table_id] = TableInfo(
             id=table_id,
             filename=path.name,
@@ -88,16 +132,19 @@ class TableManager:
 
     @staticmethod
     def _load_csv(path: Path) -> pd.DataFrame:
-        return pd.read_csv(path, encoding=detect_encoding(path))
+        return DataLoader().load(path)
 
     @staticmethod
     def _load_excel(path: Path, sheet_name: str | None) -> tuple[pd.DataFrame, str]:
-        all_sheets = pd.ExcelFile(path).sheet_names
-        if sheet_name is None:
-            sheet_name = all_sheets[0]
-        elif sheet_name not in all_sheets:
-            raise ValueError(f"工作表 '{sheet_name}' 不存在，可用工作表: {all_sheets}")
-        return pd.read_excel(path, sheet_name=sheet_name), sheet_name
+        with pd.ExcelFile(path) as workbook:
+            all_sheets = workbook.sheet_names
+            if not all_sheets:
+                raise ValueError("Excel 文件中没有工作表")
+            if sheet_name is None:
+                sheet_name = all_sheets[0]
+            elif sheet_name not in all_sheets:
+                raise ValueError(f"工作表 '{sheet_name}' 不存在，可用工作表: {all_sheets}")
+            return pd.read_excel(workbook, sheet_name=sheet_name), sheet_name
 
     def remove_table(self, table_id: str) -> bool:
         """删除指定表。"""
@@ -105,6 +152,8 @@ class TableManager:
             return False
         del self._frames[table_id]
         del self._table_infos[table_id]
+        self._revisions.pop(table_id, None)
+        self._undo_frames.pop(table_id, None)
         if self._active_table_id == table_id:
             self._active_table_id = next(iter(self._frames)) if self._frames else None
         return True
@@ -124,6 +173,12 @@ class TableManager:
         if not self._active_table_id or self._active_table_id not in self._frames:
             raise ValueError("未加载任何表格")
         return self._frames[self._active_table_id]
+
+    def get_table_df(self, table_id: str) -> pd.DataFrame:
+        """Return an independent copy of a registered table for export."""
+        if table_id not in self._frames:
+            raise ValueError("指定的表不存在")
+        return self._frames[table_id].copy(deep=True)
 
     def set_active_table(self, table_id: str) -> bool:
         if table_id in self._frames:
@@ -154,6 +209,79 @@ class TableManager:
         frame = self._frames.get(table_id)
         return list(frame.columns) if frame is not None else []
 
+    def _cleaning_target(self, table_id: str | None) -> tuple[str, pd.DataFrame]:
+        selected = table_id or self._active_table_id
+        if not selected or selected not in self._frames:
+            raise ValueError("请选择一张已加载的表")
+        return selected, self._frames[selected]
+
+    @staticmethod
+    def _cleaning_result(before: pd.DataFrame, after: pd.DataFrame, revision: int, sample_rows: int = 5) -> dict[str, Any]:
+        if not isinstance(sample_rows, int) or isinstance(sample_rows, bool) or not 1 <= sample_rows <= 20:
+            raise ValueError("预览行数必须在 1 到 20 之间")
+
+        def rows(frame: pd.DataFrame) -> list[dict[str, Any]]:
+            head = frame.head(sample_rows)
+            preview = head.astype(object).where(pd.notna(head), None)
+            def cell(value: Any) -> Any:
+                if hasattr(value, "isoformat"):
+                    return value.isoformat()
+                if hasattr(value, "item"):
+                    return value.item()
+                return value
+            return [
+                {str(key): cell(value) for key, value in row.items()}
+                for row in preview.to_dict(orient="records")
+            ]
+
+        return {
+            "revision": revision,
+            "changed": not before.equals(after),
+            "before_rows": len(before),
+            "after_rows": len(after),
+            "before": rows(before),
+            "after": rows(after),
+        }
+
+    def preview_cleaning(self, steps: list[dict[str, Any]], table_id: str | None = None, sample_rows: int = 5) -> dict[str, Any]:
+        """Preview an in-memory change without changing the current table or source file."""
+        selected, before = self._cleaning_target(table_id)
+        after = clean_frame(before, steps)
+        return self._cleaning_result(before, after, self._revisions[selected], sample_rows)
+
+    def apply_cleaning(self, steps: list[dict[str, Any]], table_id: str | None = None, expected_revision: int | None = None) -> dict[str, Any]:
+        """Apply validated steps to the in-memory table; retain one undo snapshot."""
+        selected, before = self._cleaning_target(table_id)
+        if expected_revision is not None and expected_revision != self._revisions[selected]:
+            raise ValueError("表格已变化，请重新预览后再应用")
+        after = clean_frame(before, steps)
+        next_revision = self._revisions[selected] + 1
+        result = self._cleaning_result(before, after, next_revision)
+        if result["changed"]:
+            self._undo_frames[selected] = before.copy(deep=True)
+            self._frames[selected] = after
+            self._revisions[selected] = next_revision
+            self._table_infos[selected].total_rows = len(after)
+            self._table_infos[selected].total_columns = len(after.columns)
+        else:
+            result["revision"] = self._revisions[selected]
+        return result
+
+    def undo_cleaning(self, table_id: str | None = None) -> dict[str, Any]:
+        """Undo the most recent applied cleaning operation for this table."""
+        selected, before = self._cleaning_target(table_id)
+        previous = self._undo_frames.get(selected)
+        if previous is None:
+            raise ValueError("当前表没有可撤销的清洗操作")
+        next_revision = self._revisions[selected] + 1
+        result = self._cleaning_result(before, previous, next_revision)
+        self._frames[selected] = previous
+        self._undo_frames.pop(selected, None)
+        self._revisions[selected] = next_revision
+        self._table_infos[selected].total_rows = len(previous)
+        self._table_infos[selected].total_columns = len(previous.columns)
+        return result
+
     def join_tables(
         self,
         table1_id: str,
@@ -173,6 +301,8 @@ class TableManager:
             raise ValueError("两表的连接字段数量必须一致")
         if not keys1:
             raise ValueError("至少需要指定一个连接字段")
+        if len(set(keys1)) != len(keys1) or len(set(keys2)) != len(keys2):
+            raise ValueError("连接字段不能重复")
         for key in keys1:
             if key not in df1.columns:
                 raise ValueError(f"表1中不存在字段: {key}")
@@ -182,6 +312,13 @@ class TableManager:
         if join_type not in ("inner", "left", "right", "outer"):
             raise ValueError(
                 f"不支持的连接类型: {join_type}，可选: inner/left/right/outer"
+            )
+
+        estimated_rows = _estimate_join_rows(df1, df2, keys1, keys2, join_type)
+        if estimated_rows > _MAX_JOIN_ROWS:
+            raise ValueError(
+                f"预计连接结果有 {estimated_rows:,} 行，超过 {_MAX_JOIN_ROWS:,} 行限制；"
+                "请检查重复连接键或缩小输入数据范围"
             )
 
         merged = pd.merge(
@@ -195,6 +332,7 @@ class TableManager:
 
         table_id = str(uuid.uuid4())[:8]
         self._frames[table_id] = merged
+        self._revisions[table_id] = 0
         self._table_infos[table_id] = TableInfo(
             id=table_id,
             filename=f"🔗 {new_name}",

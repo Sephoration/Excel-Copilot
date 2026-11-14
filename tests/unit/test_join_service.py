@@ -19,3 +19,21 @@ def test_extract_json_embedded():
 
 def test_extract_json_no_json():
     assert _extract_json("没有任何 JSON") == "没有任何 JSON"
+
+
+def test_suggest_join_rejects_invalid_model_output(monkeypatch):
+    import pytest
+
+    from excel_co_pilot.core import join_service
+
+    class Message:
+        content = '{"new_name":"x","keys1":"id","keys2":["id"],"join_type":"inner"}'
+
+    class Client:
+        def invoke(self, prompt):
+            return Message()
+
+    monkeypatch.setattr(join_service.settings, "deepseek_api_key", "test")
+    monkeypatch.setattr(join_service, "_get_llm", lambda: Client())
+    with pytest.raises(ValueError, match="非空列名列表"):
+        join_service.suggest_join_config("left", "right")

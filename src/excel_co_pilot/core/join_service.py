@@ -80,8 +80,24 @@ def suggest_join_config(table1_summary: str, table2_summary: str) -> dict[str, A
     except json.JSONDecodeError as e:
         raise ValueError(f"AI 返回格式解析失败: {e}") from e
 
+    if not isinstance(suggestion, dict):
+        raise ValueError("AI 返回的连接建议必须是 JSON 对象")
     required_fields = ["new_name", "keys1", "keys2", "join_type"]
     for field in required_fields:
         if field not in suggestion:
             raise ValueError(f"AI 返回缺少必要字段: {field}")
+    if not isinstance(suggestion["new_name"], str) or not suggestion["new_name"].strip():
+        raise ValueError("AI 返回的新表名称不能为空")
+    for field in ("keys1", "keys2"):
+        keys = suggestion[field]
+        if not isinstance(keys, list) or not keys or not all(
+            isinstance(key, str) and key.strip() for key in keys
+        ):
+            raise ValueError(f"AI 返回的 {field} 必须是非空列名列表")
+        if len(set(keys)) != len(keys):
+            raise ValueError(f"AI 返回的 {field} 包含重复列名")
+    if len(suggestion["keys1"]) != len(suggestion["keys2"]):
+        raise ValueError("AI 返回的两表连接字段数量不一致")
+    if suggestion["join_type"] not in ("inner", "left", "right", "outer"):
+        raise ValueError("AI 返回的连接类型无效")
     return suggestion

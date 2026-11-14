@@ -123,7 +123,7 @@ class SparseIndex:
         self._known_count = len(chunks)
         log.info("bm25_built", chunks=len(chunks))
 
-    def search(self, query: str, k: int = 20) -> list[tuple[int, float]]:
+    def search(self, query: str, k: int | None = 20) -> list[tuple[int, float]]:
         self._ensure()
         if self._bm25 is None:
             return []
@@ -195,44 +195,46 @@ class Retriever:
         return {"$and": clauses}
 
     def _resolve_allowed_doc_ids(self, filters: dict | None) -> set[int] | None:
-        """把 filters 的 library / doc_ids / file_names 解析为稀疏端允许的 doc_id 集合。None 表示不过滤。
-
-        文件名匹配顺序：源名 → 文件名（含扩展名）→ 文件名去扩展名 → 含扩展名文件名子串。
-        """
+        """Resolve all supplied filters with AND semantics, matching vector metadata."""
         if not filters:
             return None
+        allowed: set[int] | None = None
+
+        def intersect(ids: set[int]) -> None:
+            nonlocal allowed
+            allowed = ids if allowed is None else allowed & ids
+
         if filters.get("library"):
-            ids = set(self.db.library_file_ids(filters["library"]))
-            # 库内再叠加 doc_ids / file_names 过滤
-            extra = self._resolve_name_ids(filters)
-            return ids if extra is None else ids & extra
-        return self._resolve_name_ids(filters)
+            intersect(set(self.db.library_file_ids(filters["library"])))
+        if "doc_ids" in filters and filters["doc_ids"] is not None:
+            values = filters["doc_ids"]
+            if not isinstance(values, (list, tuple, set)):
+                raise ValueError("doc_ids 必须为列表")
+            intersect({int(value) for value in values})
 
-    def _resolve_name_ids(self, filters: dict | None) -> set[int] | None:
-        if not filters:
-            return None
-        if filters.get("doc_ids"):
-            return {int(d) for d in filters["doc_ids"]}
-        if filters.get("file_names"):
-            names = [
-                n.lower().strip() for n in filters["file_names"] if n and str(n).strip()
-            ]
-            ids: set[int] = set()
-            for f in self.db.list_files(limit=100000):
-                full = (getattr(f, "source_name", None) or f.name) or f.name
-                cand = full.lower()
-                cand_stem = Path(cand).stem
-                for n in names:
-                    if (
-                        n == cand
-                        or n == cand_stem
-                        or (n.endswith(Path(f.name).suffix.lower()) and n in cand)
-                        or (len(n) >= 2 and n in cand_stem)
-                    ):
-                        ids.add(f.id)
-                        break
-            return ids
-        return None
+        names: set[str] | None = None
+        if filters.get("file_name"):
+            names = {str(filters["file_name"])}
+        if "file_names" in filters and filters["file_names"] is not None:
+            values = filters["file_names"]
+            if not isinstance(values, (list, tuple, set)):
+                raise ValueError("file_names 必须为列表")
+            candidates = {str(value) for value in values}
+            names = candidates if names is None else names & candidates
+        if names is not None:
+            matches: set[int] = set()
+            offset = 0
+            while names:
+                batch = self.db.list_files(status=db_mod.ST_INDEXED, limit=1000, offset=offset)
+                for record in batch:
+                    display = getattr(record, "source_name", None) or record.name
+                    if display in names:
+                        matches.add(record.id)
+                if len(batch) < 1000:
+                    break
+                offset += len(batch)
+            intersect(matches)
+        return allowed
 
     def hybrid_search(
         self,
@@ -244,6 +246,9 @@ class Retriever:
         r = self.cfg.retrieval
         top_k = top_k or r.get("final_top_k", 5)
         use_rerank = r.get("use_rerank", True) if use_rerank is None else use_rerank
+        allowed_doc_ids = self._resolve_allowed_doc_ids(filters)
+        if allowed_doc_ids is not None and not allowed_doc_ids:
+            return []
         where = self._metadata_where(filters)
 
         # 1) 语义 Top-K（score 即余弦相似度）
@@ -255,8 +260,8 @@ class Retriever:
         cosine_map = {d["chunk_id"]: d["score"] for d in dense_raw}
 
         # 2) 关键词 Top-K（BM25 不支持下推 where，按允许 doc_id 后过滤）
-        sparse = self.sparse.search(query, k=r.get("sparse_top_k", 20))
-        allowed_doc_ids = self._resolve_allowed_doc_ids(filters)
+        sparse_limit = r.get("sparse_top_k", 20)
+        sparse = self.sparse.search(query, k=None if allowed_doc_ids is not None else sparse_limit)
         if allowed_doc_ids is not None:
             if not allowed_doc_ids:
                 return []  # 指定了 doc_ids/file_names 但无匹配文档
@@ -265,6 +270,11 @@ class Retriever:
                 for x in sparse
                 if (c := self.db.get_chunk(x[0])) is not None
                 and c.doc_id in allowed_doc_ids
+            ][:sparse_limit]
+            dense = [
+                pair for pair in dense
+                if (chunk := self.db.get_chunk(pair[0])) is not None
+                and chunk.doc_id in allowed_doc_ids
             ]
 
         # 3) RRF 融合取 Top-15
@@ -290,6 +300,8 @@ class Retriever:
             if not leaf:
                 continue
             file = self.db.get_file(leaf.doc_id)
+            if file is None or file.status != db_mod.ST_INDEXED:
+                continue
             parent = self.db.get_parent_chunk(cid)
             hits.append(
                 Hit(

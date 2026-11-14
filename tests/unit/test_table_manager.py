@@ -129,3 +129,56 @@ def test_current_manager_contextvar(sales_csv: Path):
         reset_current_manager(token)
     with pytest.raises(ValueError):
         get_current_manager()
+
+
+@pytest.mark.parametrize("join_type", ["inner", "left", "right", "outer"])
+def test_estimated_join_rows_matches_pandas(join_type):
+    from excel_co_pilot.core.table_manager import _estimate_join_rows
+
+    left = pd.DataFrame({"_left_count": [1.0, 1.0, 2.0, None, None]})
+    right = pd.DataFrame({"key": [1.0, 1.0, 1.0, 3.0, None]})
+    expected = pd.merge(left, right, left_on="_left_count", right_on="key", how=join_type)
+    assert _estimate_join_rows(left, right, ["_left_count"], ["key"], join_type) == len(expected)
+
+
+def test_join_rejects_large_result_without_changing_session(tmp_path, monkeypatch):
+    import excel_co_pilot.core.table_manager as manager_module
+
+    left, right = tmp_path / "left.csv", tmp_path / "right.csv"
+    pd.DataFrame({"key": [1, 1, 1]}).to_csv(left, index=False)
+    pd.DataFrame({"key": [1, 1, 1]}).to_csv(right, index=False)
+    mgr = TableManager()
+    left_id, _ = mgr.add_table(left)
+    right_id, _ = mgr.add_table(right)
+    monkeypatch.setattr(manager_module, "_MAX_JOIN_ROWS", 8)
+    with pytest.raises(ValueError, match="预计连接结果有 9 行"):
+        mgr.join_tables(left_id, right_id, ["key"], ["key"])
+    assert mgr.active_table_id == right_id
+    assert len(mgr.list_tables()) == 2
+
+
+def test_join_rejects_repeated_keys(dept_csv: Path, num_csv: Path):
+    mgr = TableManager()
+    id1, _ = mgr.add_table(dept_csv)
+    id2, _ = mgr.add_table(num_csv)
+    with pytest.raises(ValueError, match="不能重复"):
+        mgr.join_tables(id1, id2, ["分公司ID", "分公司ID"], ["分公司ID", "分公司ID"])
+
+
+def test_table_import_preserves_single_column_csv(tmp_path: Path):
+    path = tmp_path / "single.csv"
+    path.write_text('name\n"a;b"\n', encoding="utf-8")
+    manager = TableManager()
+    manager.add_table(path)
+    assert manager.get_active_df().iloc[0, 0] == "a;b"
+    assert list(manager.get_active_df().columns) == ["name"]
+
+
+def test_estimated_join_rows_with_empty_table_and_compound_null_keys():
+    from excel_co_pilot.core.table_manager import _estimate_join_rows
+
+    empty = pd.DataFrame({"a": pd.Series([], dtype="float64"), "b": pd.Series([], dtype="object")})
+    rows = pd.DataFrame({"a": [1.0, None, None], "b": ["x", None, None]})
+    for how in ("inner", "left", "right", "outer"):
+        expected = pd.merge(empty, rows, on=["a", "b"], how=how)
+        assert _estimate_join_rows(empty, rows, ["a", "b"], ["a", "b"], how) == len(expected)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from typing import ClassVar
 
@@ -18,7 +19,6 @@ class DataLoader:
     SUPPORTED: ClassVar[set[str]] = {
         ".csv",
         ".xlsx",
-        ".xls",
         ".json",
         ".parquet",
         ".pdf",
@@ -43,7 +43,7 @@ class DataLoader:
     def _dispatch(self, path: Path, suffix: str) -> pd.DataFrame:
         if suffix == ".csv":
             return self._load_csv(path)
-        if suffix in (".xlsx", ".xls"):
+        if suffix in (".xlsx", ".xlsm"):
             return self._load_excel(path)
         if suffix == ".json":
             return pd.read_json(path)
@@ -56,10 +56,20 @@ class DataLoader:
     @staticmethod
     def _load_csv(path: Path) -> pd.DataFrame:
         encoding = detect_encoding(path)
-        df = pd.read_csv(path, encoding=encoding)
-        if df.shape[1] == 1:
-            df = pd.read_csv(path, encoding=encoding, sep=";", on_bad_lines="skip")
-        return df
+        # 只在表头明确包含分隔字段时切换分隔符；保留单列表格。
+        # csv.reader 正确处理被引号包裹的分号和制表符。
+        with path.open("r", encoding=encoding, newline="") as handle:
+            first = next(csv.reader(handle), [])
+        separator = ","
+        if len(first) == 1:
+            for candidate in (";", "\t"):
+                with path.open("r", encoding=encoding, newline="") as handle:
+                    candidate_header = next(csv.reader(handle, delimiter=candidate), [])
+                if len(candidate_header) > 1:
+                    separator = candidate
+                    break
+        # 保持 pandas 默认的报错行为，不因格式错误而静默丢弃行。
+        return pd.read_csv(path, encoding=encoding, sep=separator)
 
     @staticmethod
     def _load_excel(path: Path) -> pd.DataFrame:

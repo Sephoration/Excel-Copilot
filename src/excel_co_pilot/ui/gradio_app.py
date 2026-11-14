@@ -327,6 +327,37 @@ label, .gr-text, .gr-markdown { color: #1a1d21; }
     font-size: .95rem !important;
     line-height: 1.65 !important;
 }
+
+/* 数据工作台视觉系统 */
+body { background: #f3f7f6 !important; color: #19312f !important; }
+.gradio-container { max-width: 1380px !important; padding: 1.2rem 1.6rem 3rem !important; }
+.gradio-container .tabs > .tab-nav { border-bottom: 1px solid #dbe6e1 !important; gap: .45rem !important; padding: .25rem .2rem .8rem !important; }
+.gradio-container .tabs > .tab-nav button { border-radius: 12px !important; font-weight: 650 !important; padding: .65rem 1rem !important; }
+.gradio-container .tabs > .tab-nav button.selected { color: #126452 !important; background: #e4f2eb !important; border-color: #b5dec9 !important; }
+.hero-box { border-radius: 22px !important; background: linear-gradient(135deg, #f5fbf7 0%, #e5f3ef 55%, #d7eae3 100%) !important; padding: 3.2rem 2rem 2rem !important; border: 1px solid #d5e7dc !important; }
+.hero-title, .section-title { color: #173d35 !important; letter-spacing: -.025em !important; }
+.hero-sub, .section-sub { color: #526e65 !important; }
+.mode-card { border-color: #d5e6dc !important; box-shadow: 0 10px 30px rgba(26, 77, 59, .055) !important; }
+.mode-card:hover { border-color: #8dc6aa !important; box-shadow: 0 14px 34px rgba(26, 77, 59, .11) !important; }
+.mode-card .mode-tag { background: #e4f3eb !important; color: #176953 !important; }
+#analysis_card { border-top-color: #238269 !important; }
+#kb_card { border-top-color: #637f80 !important; }
+.two-pane { grid-template-columns: minmax(340px, 390px) minmax(0, 1fr) !important; gap: 1.35rem !important; }
+.side-panel { border-color: #dbe7e1 !important; border-radius: 18px !important; padding: 1.25rem !important; box-shadow: 0 8px 26px rgba(18, 74, 55, .06) !important; }
+.side-panel .side-section + .side-section { border-top-color: #e4eee8 !important; margin-top: 1.1rem !important; padding-top: 1.25rem !important; }
+.side-panel h3 { color: #214b3e !important; }
+.side-panel .gr-accordion { border-radius: 12px !important; border-color: #dce9e2 !important; margin-top: .65rem !important; }
+.mode-bar { background: #e9f5ee !important; border-color: #c7e5d3 !important; color: #235f49 !important; padding: .75rem 1rem !important; }
+.mode-bar .mode-pill { background: #26775f !important; }
+.tool-chain { border-color: #dce9e2 !important; border-radius: 14px !important; }
+.tool-step { border-left-color: #4b9578 !important; background: #f8fbf9 !important; }
+.tool-step-idx { background: #26775f !important; }
+.tool-chain-count { color: #26775f !important; background: #e7f4eb !important; }
+.kb-answer { border-left-color: #4a8a74 !important; background: #edf7f0 !important; }
+.kb-chat-box .gr-chatbot { border-color: #d8e6dd !important; border-radius: 14px !important; }
+.side-panel button.primary, .side-panel button[variant="primary"] { background: #26775f !important; border-color: #26775f !important; }
+.chat-input-sticky { border: 1px solid #dbe9e1 !important; border-radius: 16px !important; background: #fff !important; padding: .7rem !important; box-shadow: 0 8px 24px rgba(18, 74, 55, .06) !important; }
+@media (max-width: 980px) { .two-pane { grid-template-columns: 1fr !important; } .gradio-container { padding: .75rem !important; } }
 """
     + PROGRESS_CSS
 )
@@ -334,8 +365,10 @@ label, .gr-text, .gr-markdown { color: #1a1d21; }
 
 def _status_badge(session: Session) -> str:
     if session.llm_ready:
+        from html import escape
+
         return (
-            f"<span class='badge-pill ok'><span class='dot'></span>LLM 已就绪 · {session.llm_model_name}</span>"
+            f"<span class='badge-pill ok'><span class='dot'></span>LLM 已就绪 · {escape(session.llm_model_name)}</span>"
         )
     return "<span class='badge-pill warn'><span class='dot'></span>未配置 LLM —— 请先在下方向「模型配置」填写 API Key</span>"
 
@@ -344,7 +377,7 @@ def _home_view(session: Session, tabs: gr.Tabs) -> gr.Markdown:
     """首页 Tab：Hero + 模型配置 + 模式卡片（点击卡片切到对应 Tab）。"""
     with gr.Column(elem_classes="hero-box"):
         gr.Markdown(
-            "<div class='privacy-tag'>🏠 本地运行 · 数据 100% 私有</div>",
+            "<div class='privacy-tag'>本地处理表格 · 使用远端模型时会发送必要上下文</div>",
             elem_classes="hero-badge",
         )
         gr.Markdown(
@@ -456,7 +489,7 @@ def build_ui() -> gr.Blocks:
         with gr.Tabs() as tabs:
             with gr.Tab("🏠 首页", id="home"):
                 _home_view(session, tabs)
-            with gr.Tab("📊 单次问答", id="analysis"):
+            with gr.Tab("📊 数据工作台", id="analysis"):
                 _analysis_workspace(state)
             with gr.Tab("📚 知识库", id="kb"):
                 _kb_workspace()
@@ -466,7 +499,7 @@ def build_ui() -> gr.Blocks:
 
 # Gradio 6：css / theme 需在 launch() 时传入（见 main.py）
 APP_CSS = _CSS
-APP_THEME = gr.themes.Soft(primary_hue="indigo", neutral_hue="slate")
+APP_THEME = gr.themes.Soft(primary_hue="emerald", neutral_hue="slate")
 
 
 __all__ = ["APP_CSS", "APP_THEME", "build_ui"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 from pathlib import Path
 
 _ENCODING_CANDIDATES = ("utf-8-sig", "utf-8", "gbk", "iso-8859-1")
@@ -12,10 +13,11 @@ def detect_encoding(path: Path, sample_bytes: int = 65536) -> str:
 
     候选顺序：utf-8-sig（带 BOM）→ utf-8 → gbk → iso-8859-1（永不失败，兜底）。
     """
-    raw = path.read_bytes()[:sample_bytes]
+    with path.open("rb") as handle:
+        raw = handle.read(sample_bytes)
     for enc in _ENCODING_CANDIDATES:
         try:
-            raw.decode(enc)
+            codecs.getincrementaldecoder(enc)().decode(raw, final=False)
             return enc
         except UnicodeDecodeError:
             continue

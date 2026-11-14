@@ -16,9 +16,11 @@ from .progress import progress_html
 
 def _mode_bar(mode: str, detail: str) -> str:
     """工作台顶部模式指示条。"""
+    import html
+
     return (
-        f"<div class='mode-bar'><span class='mode-pill'>{mode}</span>"
-        f"<span class='mode-active'>{detail}</span></div>"
+        f"<div class='mode-bar'><span class='mode-pill'>{html.escape(mode)}</span>"
+        f"<span class='mode-active'>{html.escape(detail)}</span></div>"
     )
 
 
@@ -63,8 +65,8 @@ def _analysis_workspace(state: gr.State) -> None:
 
     with gr.Column():
         gr.Markdown(
-            "<span class='section-title'>📊 单次问答</span>"
-            "<span class='section-sub' style='display:block'>表格 → 结构化问数（工具调用 + 多表联表）；文档 → 文件进上下文问答</span>",
+            "<span class='section-title'>📊 数据工作台</span>"
+            "<span class='section-sub' style='display:block'>导入表格 → 检查与清洗 → 分析问答 → 导出结果</span>",
             elem_classes="section-head",
         )
 
@@ -76,7 +78,7 @@ def _analysis_workspace(state: gr.State) -> None:
                     table_upload = gr.File(
                         label="CSV / Excel（可多选，支持多表联表）",
                         file_count="multiple",
-                        file_types=[".csv", ".xlsx", ".xls"],
+                        file_types=[".csv", ".xlsx", ".xlsm"],
                         type="filepath",
                     )
                     with gr.Row():
@@ -87,6 +89,41 @@ def _analysis_workspace(state: gr.State) -> None:
                     active_dd = gr.Dropdown(
                         label="当前操作表", choices=[], interactive=True
                     )
+                    with gr.Accordion("🔎 数据质量检查", open=False):
+                        quality_btn = gr.Button("检查当前表")
+                        quality_report = gr.HTML("（点击检查当前表；不会修改数据）")
+                    with gr.Accordion("📑 工作簿与导出", open=False):
+                        sheet_file = gr.File(label="选择 Excel 工作簿", file_types=[".xlsx", ".xlsm"], type="filepath")
+                        sheet_scan = gr.Button("读取工作表列表")
+                        sheet_choice = gr.Dropdown(label="工作表", choices=[])
+                        sheet_import = gr.Button("导入所选工作表")
+                        sheet_status = gr.Markdown("")
+                        with gr.Row():
+                            export_csv = gr.Button("导出当前表 CSV")
+                            export_xlsx = gr.Button("导出全部表 XLSX")
+                        export_status = gr.Markdown("")
+                        export_file = gr.File(label="下载导出文件", interactive=False)
+                    with gr.Accordion("🧹 数据清洗", open=False):
+                        gr.Markdown("按顺序添加步骤，先预览再应用；只修改当前会话中的表格。")
+                        cleaning_operation = gr.Dropdown(
+                            label="操作", choices=[("清理首尾空格", "trim"),
+                            ("空白转为空值", "blank_to_null"),
+                            ("转换为数值", "convert_numeric"),
+                            ("删除重复行", "drop_duplicates")], value="trim"
+                        )
+                        cleaning_column = gr.Textbox(label="列名（删除重复行时留空）")
+                        with gr.Row():
+                            cleaning_add = gr.Button("添加步骤")
+                            cleaning_reset = gr.Button("清空步骤")
+                        cleaning_steps = gr.State([])
+                        cleaning_preview_state = gr.State(None)
+                        cleaning_plan = gr.JSON(label="清洗步骤", value=[])
+                        with gr.Row():
+                            cleaning_preview = gr.Button("预览变化")
+                            cleaning_apply = gr.Button("应用清洗", variant="primary")
+                            cleaning_undo = gr.Button("撤销上次应用")
+                        cleaning_status = gr.Markdown("")
+                        cleaning_diff = gr.JSON(label="前后示例")
                     with gr.Accordion("🔗 智能联表", open=False):
                         with gr.Row():
                             jt1 = gr.Dropdown(label="表 1", choices=[])
@@ -230,7 +267,7 @@ def _analysis_workspace(state: gr.State) -> None:
         def on_switch_table(table_id: str | None, session: Session):
             if table_id:
                 session.tables.set_active_table(table_id)
-            return _tables_html(session)
+            return _tables_html(session), "（当前表已切换，请重新检查）"
 
         def on_remove_table(table_id: str | None, session: Session):
             if not table_id:
@@ -242,6 +279,42 @@ def _analysis_workspace(state: gr.State) -> None:
             ok = session.tables.remove_table(table_id)
             status = "🗑 已移除" if ok else "❌ 移除失败（表不存在）"
             return status, _tables_html(session), *_dd_updates(session)
+
+        def on_quality(session: Session) -> str:
+            import html
+
+            from ..core.data_quality import profile_dataframe
+
+            if not session.tables.is_loaded:
+                return "请先添加表格。"
+            try:
+                info = session.tables.get_active_table_info()
+                report = profile_dataframe(session.tables.get_active_df())
+                name = html.escape(info.filename if info else "当前表")
+                duplicate = report["duplicate_rows"]
+                dup_text = "无法计算" if duplicate is None else str(duplicate)
+                rows = []
+                for column in report["columns"]:
+                    unique = column["unique_count"]
+                    rows.append(
+                        "<tr>"
+                        f"<td>{html.escape(column['name'])}</td>"
+                        f"<td>{html.escape(column['kind'])} ({html.escape(column['dtype'])})</td>"
+                        f"<td>{column['null_count']}</td><td>{column['blank_count']}</td>"
+                        f"<td>{column['missing_percent']:.2f}%</td>"
+                        f"<td>{unique if unique is not None else '无法计算'}</td></tr>"
+                    )
+                truncated = "（仅显示前 100 列）" if report["columns_truncated"] else ""
+                return (
+                    f"<p><strong>{name}</strong>：{report['total_rows']} 行 × "
+                    f"{report['total_columns']} 列；重复行（不含首次）：{dup_text}</p>"
+                    f"<p>缺失率包含空值和空白字符串。{truncated}</p>"
+                    "<div style='overflow-x:auto'><table><thead><tr><th>列</th><th>类型</th>"
+                    "<th>空值</th><th>空白</th><th>缺失率</th><th>不同值</th></tr></thead><tbody>"
+                    + "".join(rows) + "</tbody></table></div>"
+                )
+            except Exception as exc:
+                return f"检查失败：{html.escape(str(exc))}"
 
         def on_suggest(t1: str | None, t2: str | None, session: Session):
             if not t1 or not t2:
@@ -529,26 +602,143 @@ def _analysis_workspace(state: gr.State) -> None:
                     new_history,
                 )
 
+        def on_sheet_scan(path: str | None):
+            from ..core.workbook_io import list_sheets
+            if not path:
+                return gr.update(choices=[], value=None), "请先选择工作簿。"
+            try:
+                names = list_sheets(path)
+                return gr.update(choices=names, value=names[0] if names else None), f"找到 {len(names)} 张工作表。"
+            except Exception as exc:
+                return gr.update(choices=[], value=None), f"读取失败：{exc}"
+
+        def on_sheet_import(path: str | None, sheet: str | None, session: Session):
+            if not path or not sheet:
+                return "请选择工作簿和工作表。", _tables_html(session), *_dd_updates(session), "（请重新检查当前表）"
+            try:
+                info = session.add_table(path, sheet_name=sheet)
+                status = f"已导入 {info['name']} / {sheet}。"
+            except Exception as exc:
+                status = f"导入失败：{exc}"
+            return status, _tables_html(session), *_dd_updates(session), "（请重新检查当前表）"
+
+        def on_export(session: Session, format_name: str):
+            import os
+            import tempfile
+            from ..core.workbook_io import write_export
+            if not session.tables.is_loaded:
+                return None, "请先添加表格。"
+            try:
+                if format_name == "csv":
+                    info = session.tables.get_active_table_info()
+                    frames = {info.filename if info else "当前表": session.tables.get_active_df().copy(deep=True)}
+                else:
+                    rows = session.tables.list_tables()
+                    frames = {f"{i+1}_{row['filename']}": session.tables.get_table_df(row["id"])
+                              for i, row in enumerate(rows)}
+                fd, path = tempfile.mkstemp(prefix="excel-copilot-", suffix=f".{format_name}")
+                try:
+                    with os.fdopen(fd, "wb") as output:
+                        write_export(frames, output, format_name)
+                except Exception:
+                    os.unlink(path)
+                    raise
+                return path, f"已生成 {format_name.upper()} 文件，可点击下载。"
+            except Exception as exc:
+                return None, f"导出失败：{exc}"
+
+        def on_clean_add(operation: str, column: str, steps: list[dict] | None):
+            steps = list(steps or [])
+            if len(steps) >= 10:
+                return steps, steps, None, "最多设置 10 个步骤。"
+            if operation not in {"trim", "blank_to_null", "convert_numeric", "drop_duplicates"}:
+                return steps, steps, None, "请选择有效操作。"
+            if operation != "drop_duplicates" and not column.strip():
+                return steps, steps, None, "请输入列名。"
+            step = {"operation": operation}
+            if operation != "drop_duplicates":
+                step["column"] = column.strip()
+            steps.append(step)
+            return steps, steps, None, "已添加步骤；请重新预览。"
+
+        def on_clean_preview(steps: list[dict] | None, session: Session):
+            if not steps:
+                return None, None, "请先添加清洗步骤。"
+            try:
+                table_id = session.tables.active_table_id
+                result = session.tables.preview_cleaning(steps, table_id=table_id)
+                token = {"table_id": table_id, "revision": result["revision"], "steps": steps}
+                return token, result, "预览完成；确认示例后可应用。"
+            except Exception as exc:
+                return None, None, f"预览失败：{exc}"
+
+        def on_clean_apply(preview: dict | None, session: Session):
+            if not preview or preview["table_id"] != session.tables.active_table_id:
+                return None, "请对当前表重新预览。", _tables_html(session), None
+            try:
+                result = session.tables.apply_cleaning(
+                    preview["steps"], table_id=preview["table_id"],
+                    expected_revision=preview["revision"],
+                )
+                return result, "已应用清洗。", _tables_html(session), None
+            except Exception as exc:
+                return None, f"应用失败：{exc}", _tables_html(session), None
+
+        def on_clean_undo(session: Session):
+            try:
+                result = session.tables.undo_cleaning()
+                return result, "已撤销上次清洗。", _tables_html(session), None
+            except Exception as exc:
+                return None, f"撤销失败：{exc}", _tables_html(session), None
+
+        # 数据源变化后清除旧报告，避免把旧表的检查结果当成当前表。
+        def on_add_table_with_quality(files: Any, session: Session):
+            return (*on_add_table(files, session), "（表格已更新，请重新检查）")
+
+        def on_remove_table_with_quality(table_id: str | None, session: Session):
+            return (*on_remove_table(table_id, session), "（表格已更新，请重新检查）")
+
+        def on_join_with_quality(t1: str | None, t2: str | None, suggestion: dict | None, session: Session):
+            return (*on_join(t1, t2, suggestion, session), "（表格已更新，请重新检查）")
+
+        sheet_scan.click(on_sheet_scan, [sheet_file], [sheet_choice, sheet_status])
+        sheet_import.click(on_sheet_import, [sheet_file, sheet_choice, state],
+            [table_status, table_list_md, active_dd, jt1, jt2, quality_report])
+        export_csv.click(lambda session: on_export(session, "csv"), [state], [export_file, export_status])
+        export_xlsx.click(lambda session: on_export(session, "xlsx"), [state], [export_file, export_status])
+        cleaning_add.click(on_clean_add,
+            [cleaning_operation, cleaning_column, cleaning_steps],
+            [cleaning_steps, cleaning_plan, cleaning_preview_state, cleaning_status])
+        cleaning_reset.click(lambda: ([], [], None, "步骤已清空。"),
+            outputs=[cleaning_steps, cleaning_plan, cleaning_preview_state, cleaning_status])
+        cleaning_preview.click(on_clean_preview, [cleaning_steps, state],
+            [cleaning_preview_state, cleaning_diff, cleaning_status])
+        cleaning_apply.click(on_clean_apply, [cleaning_preview_state, state],
+            [cleaning_diff, cleaning_status, table_list_md, cleaning_preview_state])
+        cleaning_undo.click(on_clean_undo, [state],
+            [cleaning_diff, cleaning_status, table_list_md, cleaning_preview_state])
+
         # ---- 事件 ----
 
         add_table_btn.click(
-            on_add_table,
+            on_add_table_with_quality,
             [table_upload, state],
-            [table_status, table_list_md, active_dd, jt1, jt2],
+            [table_status, table_list_md, active_dd, jt1, jt2, quality_report],
         )
-        active_dd.change(on_switch_table, [active_dd, state], [table_list_md])
+        active_dd.change(on_switch_table, [active_dd, state], [table_list_md, quality_report])
         remove_table_btn.click(
-            on_remove_table,
+            on_remove_table_with_quality,
             [active_dd, state],
-            [table_status, table_list_md, active_dd, jt1, jt2],
+            [table_status, table_list_md, active_dd, jt1, jt2, quality_report],
         )
+        quality_btn.click(on_quality, [state], [quality_report])
         suggest_btn.click(
             on_suggest, [jt1, jt2, state], [suggest_md, join_status, suggest_state]
         )
         do_join_btn.click(
-            on_join,
+            on_join_with_quality,
             [jt1, jt2, suggest_state, state],
-            [table_list_md, active_dd, jt1, jt2, join_status],
+            [table_list_md, active_dd, jt1, jt2, join_status, quality_report],
         )
         send_btn.click(on_send, [upload, state], [context_md, context_md])
         clear_btn.click(on_clear, [state], [context_md, context_md])

@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from . import db as db_mod
 from .logging import get_logger, set_trace_id
@@ -51,7 +51,7 @@ class QAEngine:
         rewritten: list[str] = []
         threshold = self.cfg.retrieval.get("query_rewrite_threshold", 0.62)
         for _ in range(max_rounds - 1):
-            if not hits or hits[0].cosine >= threshold:
+            if hits and hits[0].cosine >= threshold:
                 break
             variants = self._generate_variants(question)
             if not variants:
@@ -110,15 +110,21 @@ class QAEngine:
         parts: list[str] = []
         citations: list[dict] = []
         used = 0
-        for i, h in enumerate(hits, start=1):
-            text = h.parent.text if h.parent else h.leaf.text
-            text = text[:MAX_REFERENCE_CHARS]
+        for h in hits:
+            i = len(citations) + 1
             page = f"第{h.page}页" if h.page else "无页码"
-            item = f"[{i}] 《{h.file_name}》{page}:\n{text}"
-            if used and used + len(item) > budget:
+            header = f"[{i}] 《{h.file_name}》{page}:\n"
+            separator_size = 2 if parts else 0
+            remaining = budget - used - separator_size - len(header)
+            if remaining <= 0:
                 break
+            source_text = h.parent.text if h.parent else h.leaf.text
+            text = source_text[: min(MAX_REFERENCE_CHARS, remaining)]
+            if not text:
+                continue
+            item = header + text
             parts.append(item)
-            used += len(item)
+            used += separator_size + len(item)
             citations.append(
                 {
                     "id": i,
@@ -151,7 +157,7 @@ class QAEngine:
         question: str,
         history: list[dict] | None = None,
         filters: dict | None = None,
-    ) -> tuple[AnswerResult, str, list[dict]]:
+    ) -> tuple[AnswerResult, str, str]:
         """返回 (result, prompt, context)；result 尚未填 answer。"""
         trace_id = uuid.uuid4().hex[:12]
         set_trace_id(trace_id)
@@ -174,6 +180,11 @@ class QAEngine:
             return result, "", ""
 
         context, citations = self._build_context(hits)
+        if not citations:
+            result.refused = True
+            result.refuse_reason = "参考资料为空或上下文长度限制过小，无法生成可靠回答。"
+            result.latency_ms = int((time.time() - t0) * 1000)
+            return result, "", ""
         result.citations = citations
         prompt = self.build_prompt(question, context, history)
         return result, prompt, context
@@ -191,14 +202,17 @@ class QAEngine:
         history: list[dict] | None = None,
         filters: dict | None = None,
     ) -> AnswerResult:
-        t0 = time.time()
-        result, prompt, _ = self.prepare(question, history, filters)
-        if result.refused:
-            return self.finalize(result, result.refuse_reason, t0)
-        answer = self.llm.complete(prompt, history=history, stream=False)
-        if isinstance(answer, Iterator):  # pragma: no cover
-            answer = "".join(answer)
-        return self.finalize(result, answer, t0)
+        try:
+            t0 = time.time()
+            result, prompt, _ = self.prepare(question, history, filters)
+            if result.refused:
+                return self.finalize(result, result.refuse_reason, t0)
+            answer = self.llm.complete(prompt, history=history, stream=False)
+            if isinstance(answer, Iterator):  # pragma: no cover
+                answer = "".join(answer)
+            return self.finalize(result, answer, t0)
+        finally:
+            set_trace_id(None)
 
     def answer_stream(
         self,
@@ -207,33 +221,36 @@ class QAEngine:
         filters: dict | None = None,
     ) -> Iterator[AnswerResult | str]:
         """流式生成：先产出 delta 文本，最后产出 AnswerResult。"""
-        t0 = time.time()
-        result, prompt, _ = self.prepare(question, history, filters)
-        if result.refused:
-            result = self.finalize(result, result.refuse_reason, t0)
+        try:
+            t0 = time.time()
+            result, prompt, _ = self.prepare(question, history, filters)
+            if result.refused:
+                result = self.finalize(result, result.refuse_reason, t0)
+                log.info(
+                    "qa_completed",
+                    trace_id=result.trace_id,
+                    refused=True,
+                    stages=result.stages,
+                    hits=len(result.hits),
+                )
+                yield result
+                return
+            full: list[str] = []
+            for delta in self.llm.complete(prompt, history=history, stream=True):
+                if isinstance(delta, str):
+                    full.append(delta)
+                    yield delta
+            result = self.finalize(result, "".join(full), t0)
             log.info(
                 "qa_completed",
                 trace_id=result.trace_id,
-                refused=True,
+                refused=False,
                 stages=result.stages,
                 hits=len(result.hits),
             )
             yield result
-            return
-        full: list[str] = []
-        for delta in self.llm.complete(prompt, history=history, stream=True):
-            if isinstance(delta, str):
-                full.append(delta)
-                yield delta
-        result = self.finalize(result, "".join(full), t0)
-        log.info(
-            "qa_completed",
-            trace_id=result.trace_id,
-            refused=False,
-            stages=result.stages,
-            hits=len(result.hits),
-        )
-        yield result
+        finally:
+            set_trace_id(None)
 
 
 def _merge_hits(hits: list[Hit]) -> list[Hit]:
@@ -241,11 +258,9 @@ def _merge_hits(hits: list[Hit]) -> list[Hit]:
     best: dict[int, Hit] = {}
     for h in hits:
         if h.chunk_id not in best:
-            best[h.chunk_id] = h
+            best[h.chunk_id] = replace(h)
             continue
         cur = best[h.chunk_id]
         cur.score = max(cur.score, h.score)
         cur.cosine = max(cur.cosine, h.cosine)
-    order = {h.chunk_id: i for i, h in enumerate(hits)}
-    merged = sorted(best.values(), key=lambda h: order[h.chunk_id])
-    return merged
+    return list(best.values())
